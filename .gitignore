@@ -1,2 +1,13 @@
 *~
 *.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+bin_cell_hmm/test/out/
+bin_cell_hmm/docs/*.pdf
+bin_cell_hmm/docs/*.aux
+bin_cell_hmm/docs/*.log
+bin_cell_hmm/docs/*.out
+bin_cell_hmm/docs/*.fls
+bin_cell_hmm/docs/*.fdb_latexmk
+bin_cell_hmm/docs/*.synctex.gz

@@ -1,0 +1,397 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\Norm}{\mathcal{N}}
+\newcommand{\pstay}{p_{\mathrm{stay}}}
+\newcommand{\x}{\mathbf{x}}
+
+\title{Bin-cell HMM for CHISEL:\\model, fitting and copy-number calling}
+\author{Runpeng Luo}
+\date{2026-11-12}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+CHISEL~\cite{zaccaria2021} clusters genomic bins globally: each bin is one point of RDRs and BAFs across all cells,
+so a cluster is a set of bins shared by every cell. The bin-cell HMM clusters the
+(bin, cell) points instead. Every cell is a Markov chain along its bins over $K$ hidden states
+shared by all cells, each state emitting (RDR, BAF) from a Gaussian. The emission means start
+on the integer copy-number grid and are refined by Baum-Welch with fixed start and transition
+probabilities. The states are then labeled with copy numbers, either by the nearest grid point
+or, per cell, by CHISEL's own \code{Caller.calling}.
+\end{abstract}
+
+\section{Data}\label{sec:data}
+
+Cells are $e = 1, \dots, N$, sorted by name, and bins $t = 1, \dots, T$, sorted by chromosome
+and position. The bins of chromosome $c$ form the contiguous block
+$\mathcal{T}_c = \{t_c, \dots, t'_c\}$.
+
+For bin $t$ and cell $e$, CHISEL's \code{combo.tsv} holds the read count of the matched normal
+$\nu_t$, the read count of the cell $n_{e,t}$, the RDR $r_{e,t}$ and the allele counts
+$A_{e,t}$, $B_{e,t}$, with
+\begin{align}
+r_{e,t} &= \frac{n_{e,t}}{\nu_t}\cdot\frac{\sum_{t'}\nu_{t'}}{\sum_{t'} n_{e,t'}}
+  \quad (0 \text{ if } \nu_t = 0), \label{eq:rdr}\\
+\beta_{e,t} &= \frac{B_{e,t}}{A_{e,t}+B_{e,t}}
+  \quad \bigl(\tfrac12 \text{ if } A_{e,t}+B_{e,t} = 0\bigr), \qquad
+\tilde\beta_{e,t} = \min(\beta_{e,t},\, 1-\beta_{e,t}). \label{eq:baf}
+\end{align}
+The observation is $\x_{e,t} = (x_{e,t,1}, x_{e,t,2}) = (r_{e,t}, \tilde\beta_{e,t})$ with the
+mirrored BAF (the default, and CHISEL's clustering input), or $(r_{e,t}, \beta_{e,t})$ with the
+phased BAF. A value that is not finite is missing: $m_{e,t,d} = 1$ if $x_{e,t,d}$ is observed
+and $0$ otherwise.
+
+CHISEL's \code{Caller.format\_combo} arranges the data as
+$\mathbf{D} \in \mathbb{R}^{T \times 2N}$ with $D_{t,2e-1} = r_{e,t}$ and
+$D_{t,2e} = \tilde\beta_{e,t}$. \code{Clusterizer.kclustering} clusters the $T$ rows of
+$\mathbf{D}$, points of $\mathbb{R}^{2N}$. The bin-cell HMM models the $NT$ points
+$\x_{e,t} \in \mathbb{R}^2$.
+
+\section{Model}\label{sec:model}
+
+The parameters are the number of states $K$, the fixed self-transition probability $\pstay$,
+and the emission parameters $\theta = \{\bm\mu_k, \bm\sigma^2_k\}_{k=1}^{K}$ with
+$\bm\mu_k, \bm\sigma^2_k \in \mathbb{R}^2$.
+
+\subsection{Hidden states}\label{sec:states}
+
+Each cell $e$ has a hidden state $z_{e,t} \in \{1, \dots, K\}$ at every bin. The $K$ states,
+and so their emission parameters, are shared by all cells. Given $\theta$, the chains of
+different cells, and of different chromosomes of one cell, are independent.
+
+\subsection{Start and transition probabilities}\label{sec:transitions}
+
+For every cell $e$, chromosome $c$ and bins $t-1, t \in \mathcal{T}_c$,
+\begin{equation}
+P(z_{e,t_c} = k) = \pi_k = \frac1K, \qquad
+P(z_{e,t} = l \mid z_{e,t-1} = k) = A_{kl} =
+\begin{cases}
+\pstay & k = l,\\[2pt]
+\dfrac{1-\pstay}{K-1} & k \ne l,
+\end{cases}
+\label{eq:transitions}
+\end{equation}
+and $\mathbf{A} = [1]$ when $K = 1$. $\bm\pi$ and $\mathbf{A}$ are fixed a priori, shared by
+all cells, and not learned. $\mathbf{A}$ is doubly stochastic, and every entry is positive when
+$0 < \pstay < 1$.
+
+\subsection{Emission}\label{sec:emission}
+
+\begin{equation}
+p(\x_{e,t} \mid z_{e,t} = k) = b_k(\x_{e,t})
+= \prod_{d=1}^{2} \Norm\bigl(x_{e,t,d};\, \mu_{k,d},\, \sigma^2_{k,d}\bigr)^{m_{e,t,d}} .
+\label{eq:emission}
+\end{equation}
+A missing dimension contributes the factor 1, i.e., it is marginalized out.
+
+\subsection{Likelihood}\label{sec:likelihood}
+
+\begin{equation}
+\mathcal{L}(\theta) = \prod_{e=1}^{N}\prod_{c}\ \sum_{z_{e,t_c},\dots,z_{e,t'_c}}
+\pi_{z_{e,t_c}}\, b_{z_{e,t_c}}(\x_{e,t_c})
+\prod_{t=t_c+1}^{t'_c} A_{z_{e,t-1} z_{e,t}}\, b_{z_{e,t}}(\x_{e,t}) .
+\label{eq:likelihood}
+\end{equation}
+
+\section{Initialization on the copy-number grid}\label{sec:init}
+
+\subsection{Grid}\label{sec:grid}
+
+With maximum total copy number $C_{\max}$ and base $\rho$, the total copy number whose expected
+RDR is 1,
+\begin{equation}
+\mathcal{G} = \bigl\{(a,b) \in \mathbb{N}_0^2 : a+b \le C_{\max},\ a \ge b \text{ if mirrored}\bigr\},
+\qquad
+\mathbf{g}(a,b) = \Bigl(\frac{a+b}{\rho},\ \frac{b}{a+b}\Bigr), \quad
+\mathbf{g}(0,0) = \bigl(0, \tfrac12\bigr).
+\label{eq:grid}
+\end{equation}
+With the mirrored grid, $b/(a+b) \le \tfrac12$ is the expected mirrored BAF.
+
+\subsection{Constrained k-means}\label{sec:kmeans}
+
+Let $\mathcal{P}$ be the points $\x_{e,t}$ with both values observed, or a uniform subsample of
+$M$ of them. Constrained k-means chooses $K$ distinct grid points
+$\mathcal{S} = \{s_1, \dots, s_K\} \subset \mathcal{G}$ that minimize
+\begin{equation}
+J(\mathcal{S}) = \sum_{\x \in \mathcal{P}} \min_{k}\ \lVert \x - \mathbf{g}(s_k) \rVert^2 ,
+\label{eq:kmeans}
+\end{equation}
+by Lloyd iterations~\cite{lloyd1982,isl2021,mackay2003} whose centers are restricted to the grid:
+\begin{enumerate}[nosep]
+\item assign each point to its nearest center,
+  $\ell(\x) = \arg\min_k \lVert \x - \mathbf{g}(s_k) \rVert^2$;
+\item in decreasing order of cluster size, move $s_k$ to the grid point nearest to the mean of
+  its members that no larger cluster has taken (an empty cluster targets its current point);
+\item stop when no center moves, or after \code{maxiter} iterations.
+\end{enumerate}
+Restart 0 starts from the $K$ grid points that are the nearest grid point of the most points.
+Restart $r > 0$ draws $K$ grid points without replacement, each with probability proportional to
+that count plus $10^{-9}$. The restart with the smallest $J$ is kept.
+
+\subsection{Initial parameters}\label{sec:init-params}
+
+\begin{equation}
+\bm\mu_k = \mathbf{g}(s_k), \qquad
+\sigma^2_{k,d} = \max\Bigl(\epsilon,\ \frac{1}{|\mathcal{P}|}\sum_{\x \in \mathcal{P}}
+  \bigl(x_d - \mu_{\ell(\x),d}\bigr)^2\Bigr),
+\label{eq:init}
+\end{equation}
+a variance tied across states, with floor $\epsilon$.
+
+\section{Baum-Welch on the emission parameters}\label{sec:em}
+
+EM maximizes $\log\mathcal{L}(\theta)$ over $\theta$ with $\bm\pi$ and $\mathbf{A}$ fixed.
+
+\subsection{E-step: scaled forward-backward}\label{sec:estep}
+
+For one cell and one chromosome block, index the bins $t = 1, \dots, \tau$ and drop $e$. Let
+$h_t = \max_k \log b_k(\x_t)$ and $\tilde b_t(k) = \exp\bigl(\log b_k(\x_t) - h_t\bigr) \le 1$.
+The scaled recursions~\cite{rabiner1989,mackay2003} are
+\begin{align}
+\hat\alpha_1(k) &= \frac{\pi_k\, \tilde b_1(k)}{c_1}, &
+\hat\alpha_t(l) &= \frac{\tilde b_t(l)}{c_t} \sum_{k} \hat\alpha_{t-1}(k)\, A_{kl}, \label{eq:forward}\\
+\hat\beta_\tau(k) &= 1, &
+\hat\beta_t(k) &= \frac{1}{c_{t+1}} \sum_{l} A_{kl}\, \tilde b_{t+1}(l)\, \hat\beta_{t+1}(l), \label{eq:backward}
+\end{align}
+where $c_t$ normalizes $\hat\alpha_t$ to sum to 1. The posteriors and the log-likelihood are
+\begin{equation}
+\gamma_t(k) = P(z_t = k \mid \x_{1:\tau})
+= \frac{\hat\alpha_t(k)\,\hat\beta_t(k)}{\sum_{k'} \hat\alpha_t(k')\,\hat\beta_t(k')},
+\qquad
+\log p(\x_{1:\tau}) = \sum_{t=1}^{\tau} \log c_t + \sum_{t=1}^{\tau} h_t .
+\label{eq:posterior}
+\end{equation}
+Since $\tilde b_t(k) = 1$ for some $k$ and $\hat\alpha_{t-1}$ sums to 1,
+$c_t \ge \min_{k,l} A_{kl} > 0$ and $c_1 \ge 1/K$, so the recursions do not underflow. All cells
+of a chromosome block are processed together, vectorized over $e$.
+
+\subsection{M-step}\label{sec:mstep}
+
+Because $\bm\pi$ and $\mathbf{A}$ are fixed, the expected complete-data log-likelihood depends
+on $\theta$ only through the emission terms, and the pairwise posteriors
+$P(z_{t-1}, z_t \mid \x)$ are not needed:
+\begin{equation}
+Q(\theta) = \sum_{e,t,k} \gamma_{e,t}(k) \sum_{d} m_{e,t,d}\,
+\log \Norm\bigl(x_{e,t,d};\, \mu_{k,d},\, \sigma^2_{k,d}\bigr) + \text{const}.
+\end{equation}
+With the sufficient statistics
+\begin{equation}
+S^{(j)}_{k,d} = \sum_{e,t} \gamma_{e,t}(k)\, m_{e,t,d}\, x_{e,t,d}^{\,j}, \qquad j = 0, 1, 2,
+\end{equation}
+the update is
+\begin{equation}
+\mu_{k,d} = \frac{S^{(1)}_{k,d}}{S^{(0)}_{k,d}}, \qquad
+\sigma^2_{k,d} = \max\Bigl(\epsilon,\ \frac{S^{(2)}_{k,d}}{S^{(0)}_{k,d}} - \mu_{k,d}^2\Bigr),
+\label{eq:mstep}
+\end{equation}
+and $\mu_{k,d}$, $\sigma^2_{k,d}$ keep their values where $S^{(0)}_{k,d} \le 10^{-8}$. For fixed
+$\mu_{k,d}$, $Q$ is unimodal in $\sigma^2_{k,d}$, so \eqref{eq:mstep} maximizes $Q$ over
+$\sigma^2 \ge \epsilon$. Each iteration is thus an EM step on the constrained parameter space,
+and $\mathcal{L}$ does not decrease~\cite{dempster1977}.
+
+\subsection{Convergence}\label{sec:convergence}
+
+The E-step of iteration $i$ yields $\ell^{(i)} = \log\mathcal{L}(\theta^{(i)})$. Fitting stops at
+the first $i \ge 1$ with $\ell^{(i)} - \ell^{(i-1)} < \text{tol}$, keeping $\theta^{(i)}$, or
+after \code{maxiter} E-steps.
+
+\section{Decoding}\label{sec:decoding}
+
+For each cell and chromosome block, the Viterbi path~\cite{viterbi1967} is
+\begin{align}
+\delta_1(k) &= \log\pi_k + \log b_k(\x_1), &
+\delta_t(l) &= \max_k \bigl[\delta_{t-1}(k) + \log A_{kl}\bigr] + \log b_l(\x_t),\\
+\psi_t(l) &= \arg\max_k \bigl[\delta_{t-1}(k) + \log A_{kl}\bigr], &
+\hat z_\tau &= \arg\max_k \delta_\tau(k), \quad \hat z_{t-1} = \psi_t(\hat z_t).
+\end{align}
+\code{hmmclustering} returns \code{members[t, e]} $= \hat z_{e,t}$. The posteriors
+$\gamma_{e,t}(k)$ of \eqref{eq:posterior} are available from \code{predict\_proba}.
+
+\section{Copy-number labels}\label{sec:labels}
+
+\subsection{Grid labels}\label{sec:grid-labels}
+
+State $k$ is labeled with the grid point nearest to its fitted mean,
+\begin{equation}
+(a_k, b_k) = \arg\min_{(a,b) \in \mathcal{G}} \lVert \bm\mu_k - \mathbf{g}(a,b) \rVert^2 ,
+\end{equation}
+the same label in every cell. This assumes that every cell has the RDR scale of
+\eqref{eq:grid}, i.e., mean total copy number $\rho$.
+
+\subsection{Per-cell labels with CHISEL's calling}\label{sec:calling}
+
+\code{hmm\_caller.py} labels the states per cell with CHISEL's \code{Caller.calling}, unchanged.
+For cell $e$, the cluster of state $k$ is $C_{k,e} = \{t : \hat z_{e,t} = k\}$, summarized as
+\code{Caller.est\_clusters} summarizes a CHISEL cluster:
+\begin{equation}
+R_{k,e} = \frac{\sum_{t \in C_{k,e}} n_{e,t}\, r_{e,t}}{\sum_{t \in C_{k,e}} n_{e,t}}, \qquad
+\tilde B_{k,e} = \frac{\sum_{t \in C_{k,e}} (A_{e,t}+B_{e,t})\, \tilde\beta_{e,t}}
+                      {\sum_{t \in C_{k,e}} (A_{e,t}+B_{e,t})}, \qquad
+\mathrm{size}_{k,e} = \sum_{t \in C_{k,e}} \mathrm{len}(t),
+\end{equation}
+with $R_{k,e} = 0$ and $\tilde B_{k,e} = \tfrac12$ where the denominators are 0. The steps
+below drop $e$. Let $f(A,B) = \min(A,B)/(A+B)$, the mirrored BAF of a state.
+
+\paragraph{Base cluster (\code{identify\_base}).}
+Starting from $s = \delta$ (shift) and raising $s$ by $\delta/2$ up to $\tfrac12$, the balanced
+clusters are
+\begin{equation}
+\mathcal{N}_s = \bigl\{k : |\tfrac12 - \tilde B_k| \le 0.2 + s,\ R_k > 0,\ |\tfrac12 - \hat\beta_k| \le s\bigr\},
+\end{equation}
+where $\hat\beta_k$ is the best of 50 EM runs fitting the mixture
+$x_t \sim \tfrac12\,\mathrm{Bin}(A_t+B_t, \beta) + \tfrac12\,\mathrm{Bin}(A_t+B_t, 1-\beta)$
+to the bins of $C_k$, $x_t$ being $A_t$ or $B_t$ at random (\code{Combiner.EM}). With
+\code{--fastscaling} the condition is $|\tfrac12 - \tilde B_k| \le s$ and $R_k > 0$. At the
+first $s$ with $\mathcal{N}_s \ne \emptyset$, every $k \in \mathcal{N}_s$ defines the bubble
+$U_k = \{k' \in \mathcal{N}_s : |R_{k'} - R_k| \le 0.05\}$, and the base RDR $\bar R$ is the
+size-weighted mean RDR of the bubble with the largest total size.
+
+\paragraph{Scale.}
+For every even base ploidy $p \in \{2, 4, \dots, P\}$, $\lambda_p = p / \bar R$: a state $(A,B)$
+predicts RDR $(A+B)/\lambda_p$ and mirrored BAF $f(A,B)$.
+
+\paragraph{Variance floors.}
+For each $p$, cluster $k$ gets the provisional state $\tilde s_k$ with total
+$\max(1, \mathrm{round}(R_k \lambda_p))$ whose $f$ is nearest to $\tilde B_k$. For each state
+$s$, $V^B_p(s)$ and $V^R_p(s)$ are the sample variances of the bins' $\tilde\beta_t$ around
+$f(s)$ and of their $r_t$ around $(A_s+B_s)/\lambda_p$, over the bins of the clusters with
+$\tilde s_k = s$ (denominator $n-1$, or 1 if $n \le 1$; $0.001$ if $n = 0$). The floors are
+$\bar v^B = \max_p \operatorname{mean}_s V^B_p(s)$ and
+$\bar v^R = \max_p \operatorname{mean}_s V^R_p(s)$, the mean taken over every state with total
+$1, \dots, \max_k \mathrm{round}(R_k\lambda_p)$.
+
+\paragraph{State of each cluster.}
+With $\hat\tau_k = \mathrm{round}(R_k \lambda_p)$, the candidates are the $(A,B)$ with $A \ge B$
+and $A + B \in \{\hat\tau_k - 1, \hat\tau_k, \hat\tau_k + 1\} \cap [0, \max_{k'}\hat\tau_{k'}]$,
+total 0 meaning $(0,0)$. The cluster takes the candidate maximizing
+\begin{equation}
+\ell_k(A,B) = \sum_{t \in C_k} \Bigl[\log\Norm\bigl(\tilde\beta_t;\, f(A,B),\, v^B_k\bigr)
+  + \log\Norm\bigl(r_t;\, (A+B)/\lambda_p,\, v^R_k\bigr)\Bigr],
+\end{equation}
+with $v^B_k = \max\bigl(\bar v^B, \widehat{\mathrm{Var}}_{t \in C_k}(\tilde\beta_t \mid f(A,B))\bigr)$
+and $v^R_k = \max\bigl(\bar v^R, \widehat{\mathrm{Var}}_{t \in C_k}(r_t \mid (A+B)/\lambda_p)\bigr)$,
+the sample variances around the predicted values. A cluster with $R_k = 0$ takes $(0,0)$ with
+score 1.
+
+\paragraph{Base ploidy (BIC).}
+Let $\tau^*_p$ be the largest total copy number whose clusters cover at least $2\%$ of the size
+of the clusters with $R_k > 0$ (if none, $\max_k \hat\tau_k$), and
+\begin{equation}
+|\mathcal{S}_p| = 1 + \sum_{\tau=0}^{\tau^*_p} N(\tau), \qquad N(0) = 1,\ N(\tau) = \lfloor \tau/2 \rfloor + 1,
+\end{equation}
+the number of allele-specific states with total at most $\tau^*_p$, plus one. With $n$ the number
+of bins of the cell and sensitivity $\kappa$ (\code{-A}),
+\begin{equation}
+\mathrm{BIC}(p) = 2\kappa\, |\mathcal{S}_p| \log n - 2 \sum_k \ell_k(A_k, B_k),
+\label{eq:bic}
+\end{equation}
+and the cell takes the $p$ of smallest BIC among those whose clusters assigned $(0,0)$ cover less
+than the fraction \code{maxhomodel} of the genome (all $p$ if none qualifies).
+
+\paragraph{Orientation and phasing.}
+Each bin takes its cluster's state ordered by its own BAF (\code{Caller.infer}'s rule):
+$(a_{e,t}, b_{e,t}) = (A, B)$ if $\beta_{e,t} \le \tfrac12$, else $(B, A)$. \code{Caller.phase}
+then runs, per chromosome, a dynamic program over the bins with two states, keep or swap the
+$(a, b)$ of all cells at the bin, minimizing
+$\sum_t \sum_e \bigl[\mathbb{1}(a_{e,t-1} \ne a_{e,t}) + \mathbb{1}(b_{e,t-1} \ne b_{e,t})\bigr]$
+after the swaps.
+
+\section{Interface}\label{sec:interface}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \code{Clusterizer.kclustering} & \code{hmm.hmmclustering} \\
+\midrule
+data & $\mathbf{D} \in \mathbb{R}^{T \times 2N}$ (\code{format\_combo}) & same $\mathbf{D}$ \\
+extra input & -- & chromosome of each row \\
+hyper-parameters & \code{restarts, threshold, seed, lord, j, LB, UB} & Section~\ref{sec:params} \\
+output & \code{members}: $T$ cluster labels & \code{members}: $T \times N$ state labels \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Hyper-parameters}\label{sec:params}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+symbol & \code{hmmclustering} & \code{hmm\_caller.py} & default \\
+\midrule
+$K$ & \code{K} & \code{--hmm-states} & required \\
+$\pstay$ & \code{stay} & \code{--hmm-stay} & 0.99 \\
+$C_{\max}$ & \code{maxcn} & \code{--hmm-maxcn} & 6 \\
+$\rho$ & \code{base} & \code{--hmm-base} & 2 \\
+mirrored grid & \code{mirrored} & (always) & true \\
+restarts of Section~\ref{sec:kmeans} & \code{restarts} & \code{--hmm-restarts} & 10 \\
+EM iterations & \code{maxiter} & -- & 100 \\
+tol & \code{tol} & -- & $10^{-2}$ \\
+$\epsilon$ & \code{varfloor} & -- & $10^{-4}$ \\
+$M$ & \code{maxinitpoints} (\code{BinCellHMM}) & -- & 200000 \\
+\midrule
+$P$ & -- & \code{-P} (CHISEL) & 4 \\
+$\kappa$ & -- & \code{-A} (CHISEL) & 1 \\
+$\delta$ & -- & \code{-d} (CHISEL) & 0.05 \\
+\code{maxhomodel} & -- & \code{--maxhomodel} (CHISEL) & 0.2 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Complexity}\label{sec:complexity}
+
+Per Baum-Welch iteration, the emissions cost $O(NTK)$ and the forward-backward recursions
+$O(NTK^2)$. The posteriors and Viterbi back-pointers are held for one chromosome block at a time,
+$O(N\,|\mathcal{T}_c|\,K)$ memory. The initialization computes $O(|\mathcal{P}|\,|\mathcal{G}|)$
+distances.
+
+\section{Limitations}\label{sec:limitations}
+
+\begin{itemize}[nosep]
+\item $K$ is an input; \code{kclustering} chooses its number of clusters by binary search on its
+  objective.
+\item One set of emission means for all cells assumes one RDR scale. A cell whose mean total copy
+  number differs shifts the RDR of every state, and the HMM spends states on the shifted copies.
+  Section~\ref{sec:calling} rescales each cell only after clustering.
+\item The base ploidy is not identifiable from RDR and BAF: $(A, B)$ at scale $\lambda$ and
+  $(2A, 2B)$ at scale $\lambda/2$ predict the same RDR and BAF. Only the penalty of \eqref{eq:bic}
+  separates them~\cite{schwarz1978,mackay2003}.
+\item The Gaussian BAF emission ignores the number of SNP-covering reads of each bin. The mirrored
+  BAF of a balanced state is biased below $\tfrac12$, since
+  $\mathbb{E}[\min(\beta, 1-\beta)] < \tfrac12$ when $\beta$ varies around $\tfrac12$.
+\end{itemize}
+
+\begin{thebibliography}{9}
+\bibitem{rabiner1989} L.~R.~Rabiner. A tutorial on hidden Markov models and selected applications
+  in speech recognition. \emph{Proc. IEEE} 77(2):257--286, 1989.
+  \url{https://doi.org/10.1109/5.18626}
+\bibitem{dempster1977} A.~P.~Dempster, N.~M.~Laird, D.~B.~Rubin. Maximum likelihood from
+  incomplete data via the EM algorithm. \emph{J. R. Stat. Soc. B} 39(1):1--38, 1977.
+  \url{https://doi.org/10.1111/j.2517-6161.1977.tb01600.x}
+\bibitem{viterbi1967} A.~J.~Viterbi. Error bounds for convolutional codes and an asymptotically
+  optimum decoding algorithm. \emph{IEEE Trans. Inf. Theory} 13(2):260--269, 1967.
+  \url{https://doi.org/10.1109/TIT.1967.1054010}
+\bibitem{lloyd1982} S.~P.~Lloyd. Least squares quantization in PCM. \emph{IEEE Trans. Inf.
+  Theory} 28(2):129--137, 1982. \url{https://doi.org/10.1109/TIT.1982.1056489}
+\bibitem{schwarz1978} G.~Schwarz. Estimating the dimension of a model. \emph{Ann. Stat.}
+  6(2):461--464, 1978. \url{https://doi.org/10.1214/aos/1176344136}
+\bibitem{mackay2003} D.~J.~C.~MacKay. \emph{Information Theory, Inference, and Learning
+  Algorithms}. Cambridge University Press, 2003: ch.~20 and 22 (k-means, EM for mixtures),
+  ch.~25 (forward-backward and Viterbi on trellises), ch.~28 (model comparison and Occam's
+  razor). \url{http://www.inference.org.uk/itila/book.html}
+\bibitem{isl2021} G.~James, D.~Witten, T.~Hastie, R.~Tibshirani. \emph{An Introduction to
+  Statistical Learning}, 2nd ed. Springer, 2021: Section~12.4.1 (k-means), Section~6.1.3 (BIC).
+  \url{https://www.statlearning.com/}
+\bibitem{zaccaria2021} S.~Zaccaria, B.~J.~Raphael. Characterizing allele- and
+  haplotype-specific copy numbers in single cells with CHISEL. \emph{Nat. Biotechnol.}
+  39:207--214, 2021. \url{https://doi.org/10.1038/s41587-020-0661-6}
+\end{thebibliography}
+
+\end{document}
