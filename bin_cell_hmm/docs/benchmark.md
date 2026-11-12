@@ -42,7 +42,7 @@ In `test/out/sim_seed<seed>[_wgd<n>]/` it writes:
 - CHISEL's `chisel/calls_bic.tsv`, `calls_cloned_bic.tsv`, `mapping_bic.tsv`;
 - the HMM's `hmm/calls_bic.tsv`, `calls_cloned_bic.tsv`, `mapping_bic.tsv`, `ploidy_bic.tsv`, `hmm.npz`;
 - `metrics.tsv`;
-- four figures: `cn_heatmaps.png` (total copy number), `error_maps.png` (allele-specific mismatches), `ab_heatmaps.pdf` ((a, b) states drawn with cnplot's `--cn-palette`, `cnamaste` by default) and `rdr_baf_states.png` (the HMM's states in (RDR, BAF)).
+- five figures: `cn_heatmaps.png` (total copy number), `error_maps.png` (allele-specific mismatches), `ab_heatmaps.pdf` ((a, b) states drawn with cnplot's `--cn-palette`, `cnamaste` by default), `rdr_baf_scatter.pdf` (cnplot (BAF, RDR) scatters, below) and `rdr_baf_states.png` (the HMM's states in (RDR, mirrored BAF)).
 
 `--n-wgd-clones N` makes the last N tumor clones whole-genome doubled. The default simulation is 120 cells (12 normal) x 200 bins (4 chromosomes x 50 bins of 5 Mb); see [simulation.md](simulation.md).
 
@@ -59,7 +59,7 @@ It simulates each class of `simulation.SIM_CLASSES` (shared CNAs, private CNAs p
 A sample is named `numcnas<shared>.<private>_cnasize<length>_ploidy2_random<replicate>` and seeded by that name, so each replicate is an independent draw, reproducible on its own. Within a lineage, the CNAs are placed without overlap.
 
 In `test/out/benchmark/` it writes:
-- one directory per sample: the outputs of one sample above except `cn_heatmaps.png`, `error_maps.png` and `rdr_baf_states.png`, plus `ab_heatmaps.pdf`, the (a, b) state of every cell and bin for the truth and each plotted method (`--cn-palette`, `cnamaste` by default);
+- one directory per sample: the outputs of one sample above except `cn_heatmaps.png`, `error_maps.png` and `rdr_baf_states.png`, with its `ab_heatmaps.pdf` and `rdr_baf_scatter.pdf`;
 - `benchmark_metrics.tsv`, every sample and method;
 - `benchmark_medians.tsv`, each method's median per class;
 - `benchmark_metrics.pdf`/`.png`, the metric page. Per class it has a box per method for `chisel_caller_bic`, `chisel_cloner_bic`, `hmm_grid`, `hmm_chisel_caller_bic` and `hmm_chisel_cloner_bic`, in a 2 x 2 grid ([plot_simulation.py](../plot_simulation.py)):
@@ -68,4 +68,11 @@ In `test/out/benchmark/` it writes:
   - the breakpoint rate (`bp_cn_rate`), on a log axis, with the truth's median per class as a dashed line;
   - the clone ARI, of the Cloner rows only.
 
-A sample whose `metrics.tsv` exists is skipped, so an interrupted run resumes where it stopped; `--plot-only` runs no sample and redraws the page, plus the `ab_heatmaps.pdf` of any finished sample without one (read back from its calls on disk). Keep `--workers` times `--jobs` within the CPU count.
+A sample whose `metrics.tsv` exists is skipped, so an interrupted run resumes where it stopped; `--plot-only` runs no sample and redraws the page, plus the `ab_heatmaps.pdf` and `rdr_baf_scatter.pdf` of any finished sample without them (read back from its calls on disk). Keep `--workers` times `--jobs` within the CPU count.
+
+## (BAF, RDR) scatters
+
+`rdr_baf_scatter.pdf` is drawn with cnplot's `plot_scatter_2d` ([`plots.plot_rdr_baf_scatters`](../plots.py), [`compare_chisel.plot_rdr_baf`](../test/compare_chisel.py)):
+- one dot per (cell, bin), BAF `B / (A + B)` unmirrored on the x-axis over [0, 1] (`cnplot.BAF_LIM`), RDR on the y-axis; entries without SNP-covering reads have no BAF and are left out;
+- one page per coloring, the truth then each method, the dots colored by that page's (a, b) calls in cnplot's `--cn-palette`, phase-free, with a marginal density per state and a key of the page's states;
+- on every page, a landmark per true state at its expected position: BAF `b / (a + b)`, RDR the median over that state's entries of `(a + b)` over the cell's mean total copy number.

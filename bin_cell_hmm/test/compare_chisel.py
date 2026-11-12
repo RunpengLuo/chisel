@@ -49,6 +49,8 @@ Outputs:
     cn_heatmaps.png, error_maps.png, rdr_baf_states.png: figures.
     ab_heatmaps.pdf: (a, b) state per cell and bin, truth and every method, drawn with cnplot
         in the --cn-palette palette (plots.py).
+    rdr_baf_scatter.pdf: cnplot (BAF, RDR) scatters, one dot per (cell, bin), a page per
+        coloring (truth, then every method), the true states as landmarks.
 Notes:
     CHISEL runs unmodified as `python2.7 src/chisel/Caller.py combo.tsv -j J --seed S`, the
     command chisel_calling issues. Cloner rewrites its input file, so it runs on a copy.
@@ -66,6 +68,7 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
+import pandas as pd
 from sklearn.metrics import adjusted_rand_score
 
 matplotlib.use("Agg")
@@ -80,7 +83,7 @@ sys.path.insert(0, str(PKG))
 from hmm import BinCellHMM, cn_grid  # noqa: E402
 from metrics import breakpoints, phase_free, supervised_metrics  # noqa: E402
 from cnplot import CN_PALETTES  # noqa: E402
-from plots import bins_table, plot_state_heatmaps  # noqa: E402
+from plots import bins_table, plot_rdr_baf_scatters, plot_state_heatmaps  # noqa: E402
 from simulation import SimConfig, simulate, write_combo, write_truth  # noqa: E402
 
 DEFAULT_PY27 = Path(
@@ -615,9 +618,60 @@ def plot_ab_heatmaps(sim, res, path, cn_palette="cnamaste"):
     )
 
 
+def truth_landmarks(sim):
+    """Return each true state's expected (BAF, RDR) as a cnplot ``expected_df``.
+
+    A state (a, b) sits at BAF b / (a + b) (0.5 for (0, 0)) and at the median, over the
+    (bin, cell) entries in that state, of (a + b) / the cell's mean total copy number, the
+    simulation's RDR expectation (simulation.py, read counts).
+
+    Args:
+        sim: Simulated data.
+
+    Returns:
+        DataFrame with ``cn_truth`` ("a|b"), ``exp_BAF``, ``exp_RDR`` and ``is_balanced``.
+    """
+    total = sim.a + sim.b
+    rel = total / total.mean(axis=1, keepdims=True)
+    rows = []
+    for a, b in sorted(set(zip(sim.a.ravel().tolist(), sim.b.ravel().tolist()))):
+        entries = (sim.a == a) & (sim.b == b)
+        rows.append(
+            {
+                "cn_truth": f"{a}|{b}",
+                "exp_BAF": b / (a + b) if a + b else 0.5,
+                "exp_RDR": float(np.median(rel[entries])),
+                "is_balanced": a == b,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_rdr_baf(sim, res, path, cn_palette="cnamaste"):
+    """Write the (BAF, RDR) scatters of one sample with cnplot, one dot per (cell, bin): a page
+    colored by the truth, then one per method of ``SHOWN``, the true states' landmarks
+    (``truth_landmarks``) on every page (``plots.plot_rdr_baf_scatters``).
+
+    Args:
+        sim: Simulated data.
+        res: ``run_sample``'s or ``load_results``' methods.
+        path: Output PDF path.
+        cn_palette: cnplot (a, b) palette.
+    """
+    baf = np.where(sim.a_count + sim.b_count > 0, sim.baf, np.nan)
+    plot_rdr_baf_scatters(
+        sim.rdr,
+        baf,
+        [("truth", sim.a, sim.b)] + [(t, res[m]["a"], res[m]["b"]) for t, m in SHOWN],
+        path,
+        truth_landmarks(sim),
+        cn_palette,
+    )
+
+
 def plot_sample(sim, res, hm, outdir, maxcn=6, seed=0, cn_palette="cnamaste"):
-    """Write one sample's figures: cn_heatmaps.png, error_maps.png, ab_heatmaps.pdf and
-    rdr_baf_states.png.
+    """Write one sample's figures: cn_heatmaps.png, error_maps.png, ab_heatmaps.pdf,
+    rdr_baf_scatter.pdf and rdr_baf_states.png.
 
     Args:
         sim: Simulated data.
@@ -651,6 +705,7 @@ def plot_sample(sim, res, hm, outdir, maxcn=6, seed=0, cn_palette="cnamaste"):
         outdir / "error_maps.png",
     )
     plot_ab_heatmaps(sim, res, outdir / "ab_heatmaps.pdf", cn_palette)
+    plot_rdr_baf(sim, res, outdir / "rdr_baf_scatter.pdf", cn_palette)
     data = hm["data"]
     points = np.column_stack([data[:, 0::2].ravel(), data[:, 1::2].ravel()])
     grid_states, grid_means = cn_grid(maxcn, 2.0, mirrored=True)

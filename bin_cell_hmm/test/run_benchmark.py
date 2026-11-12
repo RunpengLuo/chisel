@@ -28,7 +28,8 @@ Parameters:
 Outputs:
     <sample_id>/: compare_chisel.run_sample's outputs of the sample, its metrics.tsv, and
         ab_heatmaps.pdf, the (a, b) state of every cell and bin for the truth and each method
-        (compare_chisel.plot_ab_heatmaps).
+        (compare_chisel.plot_ab_heatmaps), and rdr_baf_scatter.pdf, cnplot (BAF, RDR)
+        scatters, one dot per (cell, bin), a page per coloring (compare_chisel.plot_rdr_baf).
     benchmark_metrics.tsv: every sample's rows, sample_id first, plus bp_ratio, the method's
         breakpoints over the truth's.
     benchmark_medians.tsv: each plotted method's median per class.
@@ -36,7 +37,7 @@ Outputs:
         the methods of PLOTTED.
 Notes:
     A sample whose metrics.tsv exists is not run again, so an interrupted benchmark resumes;
-    its missing heatmap is drawn from the calls on disk (compare_chisel.load_results).
+    its missing figures are drawn from the calls on disk (compare_chisel.load_results).
     Each sample is simulated by class_config, seeded by its sample id; the methods take the
     replicate index as their seed.
 """
@@ -62,6 +63,7 @@ from compare_chisel import (  # noqa: E402
     load_results,
     log,
     plot_ab_heatmaps,
+    plot_rdr_baf,
     run_sample,
     score_sample,
     write_metrics,
@@ -111,15 +113,14 @@ def parse_args():
 
 def run_one(task):
     """Simulate, run and score one sample unless its metrics.tsv exists, then draw its
-    ab_heatmaps.pdf unless it exists.
+    figures (ab_heatmaps.pdf, rdr_baf_scatter.pdf) where missing.
 
     Args:
         task: (class tuple, replicate, outdir, py27, jobs, K, stay, maxcn, cn_palette, run);
             with ``run`` False a sample without metrics.tsv is left alone.
 
     Returns:
-        (sample id, status): "done", "skipped" or "not run", plus ", heatmap" where one was
-        drawn.
+        (sample id, status): "done", "skipped" or "not run", plus the figures drawn.
     """
     (shared, private, size), rep, outdir, py27, jobs, k, stay, maxcn, palette, run = (
         task
@@ -127,7 +128,10 @@ def run_one(task):
     sid = sample_id(shared, private, size, rep)
     sample_dir = outdir / sid
     metrics = sample_dir / "metrics.tsv"
-    heatmap = sample_dir / "ab_heatmaps.pdf"
+    figures = {
+        "ab_heatmaps.pdf": plot_ab_heatmaps,
+        "rdr_baf_scatter.pdf": plot_rdr_baf,
+    }
     sim = res = None
     status = "skipped"
     if not metrics.exists():
@@ -137,12 +141,14 @@ def run_one(task):
         res, _ = run_sample(sim, sample_dir, str(py27), jobs, rep, k, stay, maxcn)
         write_metrics(score_sample(sim, res), metrics)
         status = "done"
-    if not heatmap.exists():
+    for name, draw in figures.items():
+        if (sample_dir / name).exists():
+            continue
         if sim is None:
             sim = simulate(class_config(shared, private, size, rep))
             res, _ = load_results(sim, sample_dir)
-        plot_ab_heatmaps(sim, res, heatmap, palette)
-        status += ", heatmap"
+        draw(sim, res, sample_dir / name, palette)
+        status += f", {name}"
     return sid, status
 
 

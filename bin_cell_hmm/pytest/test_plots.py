@@ -33,3 +33,24 @@ def test_plot_state_heatmaps_writes_png(tmp_path):
         path,
     )
     assert path.stat().st_size > 0
+
+
+def test_plot_rdr_baf_scatters_writes_one_page_per_coloring(tmp_path):
+    import pandas as pd
+
+    from plots import plot_rdr_baf_scatters
+
+    rng = np.random.default_rng(1)
+    a = np.ones((8, 30), dtype=int)
+    b = np.ones((8, 30), dtype=int)
+    a[4:, 10:20] = 2
+    rdr = (a + b) / 2 + rng.normal(0, 0.05, a.shape)
+    baf = np.clip(b / (a + b) + rng.normal(0, 0.05, a.shape), 0, 1)
+    baf[0, 0] = np.nan
+    landmarks = pd.DataFrame(
+        {"cn_truth": ["1|1", "2|1"], "exp_BAF": [0.5, 1 / 3], "exp_RDR": [1.0, 1.5]}
+    )
+    path = tmp_path / "scatter.pdf"
+    plot_rdr_baf_scatters(rdr, baf, [("truth", a, b), ("call", b, a)], path, landmarks)
+    data = path.read_bytes()
+    assert data.count(b"/Type /Page") - data.count(b"/Type /Pages") == 2
