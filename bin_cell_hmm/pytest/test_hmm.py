@@ -54,14 +54,13 @@ def test_make_transmat_rows_and_entries():
     np.testing.assert_array_equal(hmm.make_transmat(0.9, 1), [[1.0]])
 
 
-def test_cn_grid_mirrored_and_phased():
-    states, means = hmm.cn_grid(4, base=2.0, mirrored=True)
-    assert (states[:, 0] >= states[:, 1]).all()
-    assert (means[:, 1] <= 0.5).all()
+def test_cn_grid_holds_both_orientations():
+    states, means = hmm.cn_grid(4, base=2.0)
+    assert len(states) == sum(t + 1 for t in range(5))
     np.testing.assert_allclose(means[(states == (0, 0)).all(1)], [[0.0, 0.5]])
     np.testing.assert_allclose(means[(states == (2, 1)).all(1)], [[1.5, 1 / 3]])
-    full, _ = hmm.cn_grid(4, mirrored=False)
-    assert len(full) == sum(t + 1 for t in range(5))
+    np.testing.assert_allclose(means[(states == (1, 2)).all(1)], [[1.5, 2 / 3]])
+    assert (means[:, 1] > 0.5).any()
 
 
 def test_forward_backward_and_viterbi_match_brute_force():
@@ -152,7 +151,7 @@ def test_hmm_python27_matches_python3(tmp_path):
     code = (
         "import sys, numpy as np, hmm; d = np.load(sys.argv[1]); "
         "m = hmm.hmmclustering(d, ['c1'] * 15 + ['c2'] * 15, 3, seed=0, verbose=False); "
-        "np.save(sys.argv[2], m); np.save(sys.argv[3], hmm.cn_grid(6, mirrored=False)[1])"
+        "np.save(sys.argv[2], m); np.save(sys.argv[3], hmm.cn_grid(6)[1])"
     )
     paths = [tmp_path / f for f in ("data.npy", "members27.npy", "grid27.npy")]
     result = subprocess.run(
@@ -163,6 +162,6 @@ def test_hmm_python27_matches_python3(tmp_path):
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     assert result.returncode == 0, result.stderr
-    np.testing.assert_allclose(np.load(paths[2]), hmm.cn_grid(6, mirrored=False)[1])
+    np.testing.assert_allclose(np.load(paths[2]), hmm.cn_grid(6)[1])
     members = hmm.hmmclustering(data, chroms, 3, seed=0, verbose=False)
     np.testing.assert_array_equal(np.load(paths[1]), members)

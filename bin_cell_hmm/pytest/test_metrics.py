@@ -20,6 +20,8 @@ def test_supervised_metrics_counts():
     assert m["specificity"] == 1 - 1 / 2
     assert m["exact_altered"] == 2 / 4
     assert m["state_altered"] == 3 / 4
+    # NB: of the two phase-free matches, only 1|0 keeps its orientation (1|2 is a flipped 2|1)
+    assert m["exact_altered_hap"] == 1 / 4
 
 
 def test_supervised_metrics_nan_without_altered():

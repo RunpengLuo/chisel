@@ -9,9 +9,11 @@ Dependencies:
 
 Usage:
     python2.7 hmm_caller.py <INPUT> --hmm-states <K> [--hmm-stay 0.99] [--hmm-maxcn 6]
-        [--hmm-base 2] [--hmm-restarts 10] [--hmm-npz PATH] [Caller.py options] > calls.tsv
+        [--hmm-base 2] [--hmm-restarts 10] [--hmm-orient state] [--hmm-npz PATH]
+        [Caller.py options] > calls.tsv
         INPUT        # CHISEL combo.tsv
         --hmm-*      # hmmclustering hyper-parameters
+        --hmm-orient # orientation of each call: state (default) or bin
         --hmm-npz    # optional output of the fitted HMM
 
 Inputs:
@@ -19,6 +21,11 @@ Inputs:
 Parameters:
     --hmm-states, --hmm-stay, --hmm-maxcn, --hmm-base, --hmm-restarts: hmmclustering's K,
         stay, maxcn, base, restarts.
+    --hmm-orient: how each (bin, cell) call (A >= B from Caller.calling) is oriented.
+        state: by its HMM state's fitted BAF mean, (B, A) where it exceeds 0.5; Caller.phase
+            is not run, as the BAF is taken as phased.
+        bin: CHISEL's own rule, Caller.infer's on the (bin, cell)'s observed BAF, then
+            Caller.phase.
     Every other option is Caller.py's, parsed by Caller.parse_args: -P maxploidy,
         -A sensitivity, -s significativity, -d shift, --maxhomodel, --fastscaling, -j jobs,
         --seed. Caller's clustering options (-K, -k, -t, -q, -l) are accepted and unused.
@@ -26,18 +33,22 @@ Outputs:
     stdout: calls.tsv in Caller.py's format (CHR START END CELL NORM_COUNT COUNT RDR A_COUNT
         B_COUNT BAF CLUSTER CN_STATE); CLUSTER is the HMM state of the (bin, cell). Cloner.py
         reads it as it reads Caller.py's.
-    --hmm-npz: chroms, starts, ends (n_bins,); cells, ploidy (n_cells,); data; members
+    --hmm-npz: chroms, starts, ends (n_bins,); cells, ploidy (n_cells,); data (phased);
+        members
         (n_bins, n_cells); means, variances, state_cn, init_states (K, 2); loglik.
 Notes:
     Steps of Caller.main, with CHISEL's functions called unchanged where marked (*):
-        1. Caller.read_combo, Caller.format_combo (*).
-        2. hmm.hmmclustering in place of Clusterizer.kclustering.
+        1. Caller.read_combo (*), then format_phased: Caller.format_combo's matrix (*) with
+           each (bin, cell)'s phased BAF, B / (A + B), in place of its mirrored BAF, NaN
+           without SNP-covering reads.
+        2. hmm.hmmclustering in place of Clusterizer.kclustering; it takes the BAF as phased.
         3. Cell clusters: cluster c of cell e is the bins where the HMM puts cell e in state c.
            RDR, BAF and size follow Caller.est_clusters, per cell.
         4. Caller.init + Caller.calling per cell (*), in a Pool as Caller.call runs them: base
            cluster (identify_base), per-cell scale for each even ploidy up to -P, and the
            ploidy chosen by BIC.
-        5. Caller.infer's orientation rule per (bin, cell), then Caller.phase (*).
+        5. Orientation per --hmm-orient: by the HMM state's fitted BAF (state), or
+           Caller.infer's rule on the observed BAF then Caller.phase (*) (bin).
     Caller.calling reads clusters[c][e], counts[e][c] and rdrs[e][c] only, so a membership
     that differs between cells needs no change to it.
 """
@@ -75,9 +86,35 @@ def parse_args(argv=None):
     parser.add_argument("--hmm-maxcn", type=int, default=6)
     parser.add_argument("--hmm-base", type=float, default=2.0)
     parser.add_argument("--hmm-restarts", type=int, default=10)
+    parser.add_argument("--hmm-orient", choices=("state", "bin"), default="state")
     parser.add_argument("--hmm-npz", default=None)
     hmm_args, rest = parser.parse_known_args(argv)
     return hmm_args, Caller.parse_args(rest)
+
+
+def format_phased(bins):
+    """Return Caller.format_combo's matrix with the phased BAF in place of the mirrored one.
+
+    Rows, cells and their order come from Caller.format_combo; each BAF column holds the
+    (bin, cell)'s ``BAF``, B / (A + B), and NaN where it has no SNP-covering read (``wBAF``
+    0), which hmmclustering marginalizes out.
+
+    Args:
+        bins: Caller.read_combo's table, bins[b][e].
+
+    Returns:
+        (data, mapb, cells) as Caller.format_combo returns them.
+    """
+    _, mapb, cells = Caller.format_combo(bins)
+    pos = sorted(mapb, key=mapb.get)
+    rows = []
+    for b in pos:
+        row = []
+        for e in cells:
+            v = bins[b][e]
+            row += [v["RDR"], v["BAF"] if v["wBAF"] > 0 else float("nan")]
+        rows.append(row)
+    return np.array(rows), mapb, cells
 
 
 def cell_clusters(bins, cells, members, mapb):
@@ -163,14 +200,18 @@ def call_cells(clusters, counts, rdrs, cells, args):
     return calls, ploidy
 
 
-def orient(bins, cells, members, mapb, calls):
-    """Order each (bin, cell) call by its BAF with Caller.infer's rule.
+def orient(bins, cells, members, mapb, calls, state_baf=None):
+    """Order each (bin, cell) call (A >= B from Caller.calling) as (a, b).
 
-    Caller.infer: ``(max(p), min(p)) if bins[b][e]['BAF'] <= 0.5 else (min(p), max(p))``.
+    With ``state_baf``, by the BAF the HMM fitted to the (bin, cell)'s state:
+    ``(max(p), min(p)) if state_baf[k] <= 0.5 else (min(p), max(p))``. Without it, by the
+    (bin, cell)'s own observed BAF, Caller.infer's rule:
+    ``(max(p), min(p)) if bins[b][e]['BAF'] <= 0.5 else (min(p), max(p))``.
 
     Args:
         bins, cells, members, mapb: As ``cell_clusters``.
         calls: ``call_cells``'s calls.
+        state_baf: (K,) fitted BAF mean of each HMM state, or None.
 
     Returns:
         {b: {e: (a, b)}}, the input of Caller.phase.
@@ -179,8 +220,10 @@ def orient(bins, cells, members, mapb, calls):
     for b in bins:
         row = {}
         for x, e in enumerate(cells):
-            p = calls[e][int(members[mapb[b], x])]
-            row[e] = (max(p), min(p)) if bins[b][e]["BAF"] <= 0.5 else (min(p), max(p))
+            k = int(members[mapb[b], x])
+            p = calls[e][k]
+            baf = bins[b][e]["BAF"] if state_baf is None else state_baf[k]
+            row[e] = (max(p), min(p)) if baf <= 0.5 else (min(p), max(p))
         out[b] = row
     return out
 
@@ -191,7 +234,7 @@ def main():
 
     Caller.log("Reading combined RDRs and BAFs of barcoded cells")
     bins = Caller.read_combo(args["input"])
-    data, mapb, cells = Caller.format_combo(bins)
+    data, mapb, cells = format_phased(bins)
     pos = sorted(mapb, key=mapb.get)
 
     Caller.log("Clustering (bin, cell) points with the bin-cell HMM")
@@ -218,10 +261,14 @@ def main():
     )
     Caller.log("Number of cells for every ploidy level:\n{}".format(msg), level="INFO")
 
-    Caller.log("Phasing copy-number states along the genome (Caller.phase)")
-    copynumbers = Caller.phase(
-        orient(bins, cells, members, mapb, calls), cells, args["j"]
-    )
+    if hmm_args.hmm_orient == "state":
+        Caller.log("Orienting each call by its HMM state's fitted BAF")
+        copynumbers = orient(bins, cells, members, mapb, calls, model.means_[:, 1])
+    else:
+        Caller.log("Phasing copy-number states along the genome (Caller.phase)")
+        copynumbers = Caller.phase(
+            orient(bins, cells, members, mapb, calls), cells, args["j"]
+        )
 
     if hmm_args.hmm_npz:
         np.savez(

@@ -1,6 +1,8 @@
 """Scores of per-(bin, cell) copy-number calls against a simulation's truth.
 
-The scored unit is one bin of one cell. AB pairs are compared phase-free: (a, b) and (b, a) are equal.
+The scored unit is one bin of one cell. AB pairs are compared phase-free: (a, b) and (b, a) are equal,
+except in ``exact_altered_hap``, which needs the true pair in its orientation (A first, B second, B
+the simulation's haplotype B).
 
 The supervised metrics follow cna_maste's simulation benchmark:
     - ``sensitivity``, ``specificity``, ``exact_altered`` (N-CNA recall): cna_maste
@@ -78,6 +80,8 @@ def supervised_metrics(true_a, true_b, call_a, call_b):
             sensitivity: 1 - (truly altered called (1, 1)) / (truly altered).
             specificity: 1 - (truly (1, 1) called altered) / (truly (1, 1)).
             exact_altered: (truly altered called their true pair) / (truly altered), N-CNA recall.
+            exact_altered_hap: as exact_altered, the pair in its orientation: haplotype-specific
+                N-CNA recall.
             state_altered: (truly altered called their true CNA state) / (truly altered), CNA recall.
     """
     true_code = phase_free(true_a, true_b)
@@ -87,6 +91,9 @@ def supervised_metrics(true_a, true_b, call_a, call_b):
     altered = ~neutral
     n_alt, n_neu = altered.sum(), neutral.sum()
     same_state = cna_state(true_a, true_b) == cna_state(call_a, call_b)
+    same_hap = (np.asarray(true_a) == np.asarray(call_a)) & (
+        np.asarray(true_b) == np.asarray(call_b)
+    )
     return {
         "sensitivity": 1.0 - (altered & called_neutral).sum() / n_alt
         if n_alt
@@ -95,6 +102,9 @@ def supervised_metrics(true_a, true_b, call_a, call_b):
         if n_neu
         else float("nan"),
         "exact_altered": (altered & (true_code == call_code)).sum() / n_alt
+        if n_alt
+        else float("nan"),
+        "exact_altered_hap": (altered & same_hap).sum() / n_alt
         if n_alt
         else float("nan"),
         "state_altered": (altered & same_state).sum() / n_alt

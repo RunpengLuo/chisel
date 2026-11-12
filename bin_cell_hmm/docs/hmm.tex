@@ -43,15 +43,17 @@ r_{e,t} &= \frac{n_{e,t}}{\nu_t}\cdot\frac{\sum_{t'}\nu_{t'}}{\sum_{t'} n_{e,t'}
   \quad \bigl(\tfrac12 \text{ if } A_{e,t}+B_{e,t} = 0\bigr), \qquad
 \tilde\beta_{e,t} = \min(\beta_{e,t},\, 1-\beta_{e,t}). \label{eq:baf}
 \end{align}
-The observation is $\x_{e,t} = (x_{e,t,1}, x_{e,t,2}) = (r_{e,t}, \tilde\beta_{e,t})$ with the
-mirrored BAF (the default, and CHISEL's clustering input), or $(r_{e,t}, \beta_{e,t})$ with the
-phased BAF. A value that is not finite is missing: $m_{e,t,d} = 1$ if $x_{e,t,d}$ is observed
-and $0$ otherwise.
+The observation is $\x_{e,t} = (x_{e,t,1}, x_{e,t,2}) = (r_{e,t}, \beta_{e,t})$ with the phased
+BAF on $[0, 1]$: B is taken as the same haplotype in every bin and cell, and $\beta_{e,t}$ is not
+mirrored. Phase switches between bins are not modeled; a switch reads as a change of state. A value
+that is not finite is missing: $m_{e,t,d} = 1$ if $x_{e,t,d}$ is observed and $0$ otherwise; an
+entry without SNP-covering reads has no BAF.
 
 CHISEL's \code{Caller.format\_combo} arranges the data as
 $\mathbf{D} \in \mathbb{R}^{T \times 2N}$ with $D_{t,2e-1} = r_{e,t}$ and
-$D_{t,2e} = \tilde\beta_{e,t}$. \code{Clusterizer.kclustering} clusters the $T$ rows of
-$\mathbf{D}$, points of $\mathbb{R}^{2N}$. The bin-cell HMM models the $NT$ points
+$D_{t,2e} = \tilde\beta_{e,t}$, the mirrored BAF. \code{Clusterizer.kclustering} clusters the
+$T$ rows of $\mathbf{D}$, points of $\mathbb{R}^{2N}$. \code{hmm\_caller.format\_phased} builds
+the same layout with $D_{t,2e} = \beta_{e,t}$, and the bin-cell HMM models its $NT$ points
 $\x_{e,t} \in \mathbb{R}^2$.
 
 \section{Model}\label{sec:model}
@@ -107,13 +109,14 @@ A missing dimension contributes the factor 1, i.e., it is marginalized out.
 With maximum total copy number $C_{\max}$ and base $\rho$, the total copy number whose expected
 RDR is 1,
 \begin{equation}
-\mathcal{G} = \bigl\{(a,b) \in \mathbb{N}_0^2 : a+b \le C_{\max},\ a \ge b \text{ if mirrored}\bigr\},
+\mathcal{G} = \bigl\{(a,b) \in \mathbb{N}_0^2 : a+b \le C_{\max}\bigr\},
 \qquad
 \mathbf{g}(a,b) = \Bigl(\frac{a+b}{\rho},\ \frac{b}{a+b}\Bigr), \quad
 \mathbf{g}(0,0) = \bigl(0, \tfrac12\bigr).
 \label{eq:grid}
 \end{equation}
-With the mirrored grid, $b/(a+b) \le \tfrac12$ is the expected mirrored BAF.
+The grid holds both $(a, b)$ and $(b, a)$, at BAF $b/(a+b)$ and $a/(a+b)$: no emission mean is
+constrained to BAF $\le \tfrac12$.
 
 \subsection{Constrained k-means}\label{sec:kmeans}
 
@@ -297,10 +300,17 @@ and the cell takes the $p$ of smallest BIC among those whose clusters assigned $
 than the fraction \code{maxhomodel} of the genome (all $p$ if none qualifies).
 
 \paragraph{Orientation and phasing.}
-Each bin takes its cluster's state ordered by its own BAF (\code{Caller.infer}'s rule):
-$(a_{e,t}, b_{e,t}) = (A, B)$ if $\beta_{e,t} \le \tfrac12$, else $(B, A)$. \code{Caller.phase}
-then runs, per chromosome, a dynamic program over the bins with two states, keep or swap the
-$(a, b)$ of all cells at the bin, minimizing
+\code{Caller.calling} gives each cluster a state with $A \ge B$. By default
+(\code{--hmm-orient state}), each bin takes its cluster's state oriented by the fitted BAF mean of
+its HMM state $k = \hat z_{e,t}$: $(a_{e,t}, b_{e,t}) = (A, B)$ if $\mu_{k,2} \le \tfrac12$, else
+$(B, A)$. The HMM's BAF is phased (Sec.~\ref{sec:data}), so no phasing step follows: one that
+swaps whole bins would undo a true change between $(a, b)$ and $(b, a)$ at adjacent bins.
+
+With \code{--hmm-orient bin}, CHISEL's own steps run instead. Each bin takes the state ordered by
+its own BAF (\code{Caller.infer}'s rule): $(a_{e,t}, b_{e,t}) = (A, B)$ if
+$\beta_{e,t} \le \tfrac12$, else $(B, A)$. \code{Caller.phase} then runs, per chromosome, a
+dynamic program over the bins with two states, keep or swap the $(a, b)$ of all cells at the bin,
+minimizing
 $\sum_t \sum_e \bigl[\mathbb{1}(a_{e,t-1} \ne a_{e,t}) + \mathbb{1}(b_{e,t-1} \ne b_{e,t})\bigr]$
 after the swaps.
 
@@ -330,7 +340,6 @@ $K$ & \code{K} & \code{--hmm-states} & required \\
 $\pstay$ & \code{stay} & \code{--hmm-stay} & 0.99 \\
 $C_{\max}$ & \code{maxcn} & \code{--hmm-maxcn} & 6 \\
 $\rho$ & \code{base} & \code{--hmm-base} & 2 \\
-mirrored grid & \code{mirrored} & (always) & true \\
 restarts of Section~\ref{sec:kmeans} & \code{restarts} & \code{--hmm-restarts} & 10 \\
 EM iterations & \code{maxiter} & -- & 100 \\
 tol & \code{tol} & -- & $10^{-2}$ \\
@@ -363,9 +372,11 @@ distances.
 \item The base ploidy is not identifiable from RDR and BAF: $(A, B)$ at scale $\lambda$ and
   $(2A, 2B)$ at scale $\lambda/2$ predict the same RDR and BAF. Only the penalty of \eqref{eq:bic}
   separates them~\cite{schwarz1978,mackay2003}.
-\item The Gaussian BAF emission ignores the number of SNP-covering reads of each bin. The mirrored
-  BAF of a balanced state is biased below $\tfrac12$, since
-  $\mathbb{E}[\min(\beta, 1-\beta)] < \tfrac12$ when $\beta$ varies around $\tfrac12$.
+\item The Gaussian BAF emission ignores the number of SNP-covering reads of each bin.
+\item The BAF is taken as phased. CHISEL's \code{Combiner} orients B as each unbalanced bin's
+  pseudo-bulk minor allele and flips the blocks of a balanced bin at random, so B can switch
+  haplotype between adjacent bins; each switch then reads as a change between $(a, b)$ and
+  $(b, a)$ states. Phase switches are not modeled.
 \end{itemize}
 
 \begin{thebibliography}{9}

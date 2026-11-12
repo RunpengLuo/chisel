@@ -10,12 +10,11 @@ Each sample is scored per (bin, cell) for these rows of its `metrics.tsv`, after
 |---|---|---|
 | `chisel_caller_bic` | `kclustering` | `Caller.calling` (`CN_STATE`) |
 | `chisel_cloner_bic` | `kclustering` | `Cloner` (`CORRECTED_HAP_CN`), CHISEL's final output |
-| `hmm_grid` | `hmmclustering` on CHISEL's mirrored data matrix | each state's nearest grid point, base ploidy 2 for every cell |
-| `hmm_phased_grid` | `BinCellHMM` on unmirrored BAF, haplotype-specific grid | as `hmm_grid` |
-| `hmm_chisel_caller_bic` | `hmmclustering` (via `hmm_caller.py`) | `Caller.calling` per cell |
+| `hmm_grid` | `hmmclustering` on the phased BAF (via `hmm_caller.py`) | each state's nearest haplotype-specific grid point, base ploidy 2 for every cell |
+| `hmm_chisel_caller_bic` | `hmmclustering` (via `hmm_caller.py`) | `Caller.calling` per cell, each call oriented by its HMM state's fitted BAF |
 | `hmm_chisel_cloner_bic` | `hmmclustering` (via `hmm_caller.py`) | `Cloner` on `hmm_chisel_caller_bic`'s calls |
 
-By default K is the number of distinct true states (oracle). `Cloner` gives every cell of a clone the clone's majority state per bin (`Cloner.profiling`), so it removes cell-specific CNAs by construction.
+By default K is the number of distinct true haplotype-specific states (oracle). `Cloner` gives every cell of a clone the clone's majority state per bin (`Cloner.profiling`), so it removes cell-specific CNAs by construction.
 
 ## Metrics
 
@@ -26,6 +25,7 @@ The metrics are in [metrics.py](../metrics.py). The supervised ones follow cna_m
 | `sensitivity` | 1 - (truly altered called (1, 1)) / (truly altered) |
 | `specificity` | 1 - (truly (1, 1) called altered) / (truly (1, 1)) |
 | `exact_altered` | N-CNA recall: (truly altered called their true AB pair) / (truly altered) |
+| `exact_altered_hap` | haplotype-specific N-CNA recall: as `exact_altered`, the pair in its orientation, (a, b) not (b, a) |
 | `state_altered` | CNA recall: (truly altered called their true CNA state, one of neu, del, amp, cnloh, bamp, bdel) / (truly altered) |
 | `exact_cell_event` | (cell-specific-event entries called their true AB pair) / (cell-specific-event entries) |
 | `clone_ari` | ARI of `Cloner`'s clones against the true clones, over cells with a clone |
@@ -42,7 +42,7 @@ In `test/out/sim_seed<seed>[_wgd<n>]/` it writes:
 - CHISEL's `chisel/calls_bic.tsv`, `calls_cloned_bic.tsv`, `mapping_bic.tsv`;
 - the HMM's `hmm/calls_bic.tsv`, `calls_cloned_bic.tsv`, `mapping_bic.tsv`, `ploidy_bic.tsv`, `hmm.npz`;
 - `metrics.tsv`;
-- five figures: `cn_heatmaps.png` (total copy number), `error_maps.png` (allele-specific mismatches), `ab_heatmaps.pdf` ((a, b) states drawn with cnplot's `--cn-palette`, `cnamaste` by default), `rdr_baf_scatter.pdf` (cnplot (BAF, RDR) scatters, below) and `rdr_baf_states.png` (the HMM's states in (RDR, mirrored BAF)).
+- five figures: `cn_heatmaps.png` (total copy number), `error_maps.png` (allele-specific mismatches), `ab_heatmaps.pdf` ((a, b) states drawn with cnplot's `--cn-palette`, `cnamaste` by default), `rdr_baf_scatter.pdf` (cnplot (BAF, RDR) scatters, below) and `rdr_baf_states.png` (the HMM's initial and fitted states in (RDR, BAF)).
 
 `--n-wgd-clones N` makes the last N tumor clones whole-genome doubled. The default simulation is 120 cells (12 normal) x 200 bins (4 chromosomes x 50 bins of 5 Mb); see [simulation.md](simulation.md).
 
@@ -75,4 +75,4 @@ A sample whose `metrics.tsv` exists is skipped, so an interrupted run resumes wh
 `rdr_baf_scatter.pdf` is drawn with cnplot's `plot_scatter_2d` ([`plots.plot_rdr_baf_scatters`](../plots.py), [`compare_chisel.plot_rdr_baf`](../test/compare_chisel.py)):
 - one dot per (cell, bin), BAF `B / (A + B)` unmirrored on the x-axis over [0, 1] (`cnplot.BAF_LIM`), RDR on the y-axis; entries without SNP-covering reads have no BAF and are left out;
 - one page per coloring, the truth then each method, the dots colored by that page's (a, b) calls in cnplot's `--cn-palette`, phase-free, with a marginal density per state and a key of the page's states;
-- on every page, a landmark per true state at its expected position: BAF `b / (a + b)`, RDR the median over that state's entries of `(a + b)` over the cell's mean total copy number.
+- on each page, a labelled landmark for each state of that page's calls alone, the true states on the truth page and the method's states on its page, at the state's expected position: BAF `b / (a + b)`, RDR the median over the entries called `(a, b)` of `(a + b)` over the cell's mean called total copy number ([`plots.expected_landmarks`](../plots.py)).

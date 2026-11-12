@@ -4,7 +4,7 @@ cnplot (https://github.com/raphael-group/cnplot) draws both figures:
 - ``plot_state_heatmaps``: cell-by-bin heatmaps; ``GenomeAxis`` places the bins on a genome
   axis and ``plot_heatmap`` draws each (cells, bins) matrix.
 - ``plot_rdr_baf_scatters``: (BAF, RDR) scatters, one dot per (cell, bin), BAF unmirrored on
-  ``BAF_LIM``; ``plot_scatter_2d`` draws each page, with landmarks of expected states.
+  ``BAF_LIM``; ``plot_scatter_2d`` draws each page, with landmarks of that page's states.
 
 The (a, b) colors come from ``get_cn_cmap(cn_palette)``, which keys every state under both
 orders, so a state is drawn phase-free: (2, 1) and (1, 2) share a color. States the palette
@@ -199,23 +199,54 @@ def state_handles(states, cn_palette="cnamaste"):
     return handles
 
 
-def plot_rdr_baf_scatters(
-    rdr, baf, pages, path, landmarks=None, cn_palette="cnamaste", ylim=None
-):
-    """Write a PDF of (BAF, RDR) scatters, one page per coloring, one dot per (cell, bin).
+def expected_landmarks(a, b):
+    """Return the expected (BAF, RDR) of every (a, b) state in a set of calls, as a cnplot
+    ``expected_df``.
+
+    A state sits at BAF b / (a + b) (0.5 for (0, 0)) and at RDR the median, over the entries
+    called (a, b), of (a + b) over the cell's mean called total copy number: RDR divides each
+    cell's reads by its own total, so a state's expected RDR is its total copy number over
+    the cell's mean (CHISEL ``RDREstimator``; ``simulation.py``, read counts).
+
+    Args:
+        a: (n_cells, n_bins) called copies of haplotype A.
+        b: (n_cells, n_bins) called copies of haplotype B.
+
+    Returns:
+        DataFrame, one row per state present: ``cn_state`` ("a|b"), ``exp_BAF``,
+        ``exp_RDR``, ``is_balanced``.
+    """
+    a, b = np.asarray(a), np.asarray(b)
+    total = a + b
+    mean = total.mean(axis=1, keepdims=True)
+    rel = np.divide(total, mean, out=np.zeros(total.shape), where=mean > 0)
+    rows = []
+    for x, y in sorted(set(zip(a.ravel().tolist(), b.ravel().tolist()))):
+        entries = (a == x) & (b == y)
+        rows.append(
+            {
+                "cn_state": f"{x}|{y}",
+                "exp_BAF": y / (x + y) if x + y else 0.5,
+                "exp_RDR": float(np.median(rel[entries])),
+                "is_balanced": x == y,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_rdr_baf_scatters(rdr, baf, pages, path, cn_palette="cnamaste", ylim=None):
+    """Write a PDF of (BAF, RDR) scatters, one page per set of calls, one dot per (cell, bin).
 
     Each page is cnplot's ``plot_scatter_2d``: BAF on x over ``BAF_LIM`` (unmirrored, as
     given), RDR on y, the dots colored by that page's (a, b) calls, a marginal density per
-    state, and ``landmarks`` drawn on every page. A key of the page's states sits right of
-    the plot.
+    state, and a labelled landmark for each state of that page's calls alone, at its expected
+    position (``expected_landmarks``). A key of the page's states sits right of the plot.
 
     Args:
         rdr: (n_cells, n_bins) RDR.
         baf: (n_cells, n_bins) BAF, B / (A + B); non-finite entries are left out.
         pages: List of (title, a, b), a and b (n_cells, n_bins) int calls coloring the dots.
         path: Output PDF path.
-        landmarks: cnplot ``expected_df`` with ``cn_<name>`` ("a|b"), ``exp_BAF``,
-            ``exp_RDR`` and optional ``is_balanced``, or None for no landmarks.
         cn_palette: One of ``cnplot.CN_PALETTES``.
         ylim: RDR limits; None takes (0, max(3, 99.9th percentile of RDR)).
     """
@@ -227,6 +258,7 @@ def plot_rdr_baf_scatters(
         ylim = (0.0, max(3.0, float(top)))
     with PdfPages(path) as pdf:
         for title, a, b in pages:
+            landmarks = expected_landmarks(a, b)
             a, b = np.ravel(a), np.ravel(b)
             labels = np.array([f"{x}|{y}" for x, y in zip(a, b)])
             palette = {

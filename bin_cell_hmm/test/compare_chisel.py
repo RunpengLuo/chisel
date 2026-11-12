@@ -34,13 +34,12 @@ Outputs:
     chisel/calls_bic.tsv, chisel/caller.log: CHISEL Caller output (CLUSTER, CN_STATE), log.
     chisel/calls_cloned_bic.tsv, chisel/mapping_bic.tsv, chisel/cloner.log: CHISEL Cloner.
     hmm/calls_bic.tsv, hmm/hmm.npz, hmm/caller.log: hmm_caller.py (hmmclustering on CHISEL's
-        data matrix, then CHISEL's Caller.calling per cell), run in py2.7.
+        data matrix with the phased BAF, then CHISEL's Caller.calling per cell), run in py2.7.
     hmm/ploidy_bic.tsv: CELL, CLONE (true), PLOIDY, the BIC-selected base ploidy per cell.
     hmm/calls_cloned_bic.tsv, hmm/mapping_bic.tsv, hmm/cloner.log: CHISEL Cloner on
         hmm/calls_bic.tsv.
-    hmm_phased.npz: BinCellHMM on unmirrored BAF with a haplotype-specific grid, run in py3.
-    Rows of metrics.tsv: chisel_caller_bic, chisel_cloner_bic; hmm_grid and hmm_phased_grid
-        (HMM states labeled by the nearest grid point at ploidy base 2); hmm_chisel_caller_bic
+    Rows of metrics.tsv: chisel_caller_bic, chisel_cloner_bic; hmm_grid (HMM states labeled
+        by the nearest haplotype-specific grid point at ploidy base 2); hmm_chisel_caller_bic
         and hmm_chisel_cloner_bic (HMM states labeled per cell by Caller.calling, then
         Cloner).
     metrics.tsv: per method (and the truth as reference), sensitivity, specificity,
@@ -50,7 +49,7 @@ Outputs:
     ab_heatmaps.pdf: (a, b) state per cell and bin, truth and every method, drawn with cnplot
         in the --cn-palette palette (plots.py).
     rdr_baf_scatter.pdf: cnplot (BAF, RDR) scatters, one dot per (cell, bin), a page per
-        coloring (truth, then every method), the true states as landmarks.
+        coloring (truth, then every method), each page labelling only its own states.
 Notes:
     CHISEL runs unmodified as `python2.7 src/chisel/Caller.py combo.tsv -j J --seed S`, the
     command chisel_calling issues. Cloner rewrites its input file, so it runs on a copy.
@@ -68,7 +67,6 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
-import pandas as pd
 from sklearn.metrics import adjusted_rand_score
 
 matplotlib.use("Agg")
@@ -80,7 +78,7 @@ PKG = HERE.parent
 REPO = PKG.parent
 sys.path.insert(0, str(PKG))
 
-from hmm import BinCellHMM, cn_grid  # noqa: E402
+from hmm import cn_grid  # noqa: E402
 from metrics import breakpoints, phase_free, supervised_metrics  # noqa: E402
 from cnplot import CN_PALETTES  # noqa: E402
 from plots import bins_table, plot_rdr_baf_scatters, plot_state_heatmaps  # noqa: E402
@@ -332,8 +330,9 @@ def plot_errors(panels, sim, order, path):
 
 
 def plot_states(points, grid_states, grid_means, init_means, means, path, seed):
-    """(RDR, mirrored BAF) points with the grid, the initial and the fitted HMM state means."""
+    """(RDR, BAF) points with the grid, the initial and the fitted HMM state means."""
     rng = np.random.default_rng(seed)
+    points = points[np.isfinite(points).all(axis=1)]
     pts = points[rng.choice(len(points), min(len(points), 6000), replace=False)]
     fig, ax = plt.subplots(figsize=(7, 4.5), facecolor=SURFACE)
     _style(ax)
@@ -384,9 +383,9 @@ def plot_states(points, grid_states, grid_means, init_means, means, path, seed):
         label="fitted mean",
     )
     ax.set_xlabel("RDR", color=INK_2, fontsize=9)
-    ax.set_ylabel("mirrored BAF", color=INK_2, fontsize=9)
+    ax.set_ylabel("BAF", color=INK_2, fontsize=9)
     ax.set_xlim(0, max(3.2, float(np.quantile(pts[:, 0], 0.999))))
-    ax.set_ylim(-0.02, 0.55)
+    ax.set_ylim(-0.02, 1.02)
     ax.legend(frameon=False, fontsize=8, labelcolor=INK_2, loc="upper right")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -397,21 +396,17 @@ METHODS = (
     "chisel_caller_bic",
     "chisel_cloner_bic",
     "hmm_grid",
-    "hmm_phased_grid",
     "hmm_chisel_caller_bic",
     "hmm_chisel_cloner_bic",
 )
 """Rows of metrics.tsv after the truth, in order (docs/benchmark.md, methods compared)."""
 
 
-def run_sample(
-    sim, outdir, py27, jobs=4, seed=0, k=None, stay=0.99, maxcn=6, phased=True
-):
+def run_sample(sim, outdir, py27, jobs=4, seed=0, k=None, stay=0.99, maxcn=6):
     """Run CHISEL and the bin-cell HMM on one simulated dataset.
 
     Writes combo.tsv and truth.tsv; runs CHISEL Caller.py then Cloner.py, and hmm_caller.py
-    then Cloner.py on its calls, all in Python 2.7; with ``phased``, fits BinCellHMM on the
-    unmirrored BAF in Python 3.
+    then Cloner.py on its calls, all in Python 2.7.
 
     Args:
         sim: Simulated data.
@@ -419,10 +414,9 @@ def run_sample(
         py27: python2.7 executable of the CHISEL env.
         jobs: Parallel jobs of Caller.py and hmm_caller.py.
         seed: Seed of every method.
-        k: HMM states, or None for the number of distinct true states of each HMM variant.
+        k: HMM states, or None for the number of distinct true haplotype-specific states.
         stay: HMM self-transition probability.
         maxcn: HMM grid maximum copy number.
-        phased: Also fit the phased BinCellHMM (row hmm_phased_grid).
 
     Returns:
         (res, hm): ``res`` maps each method of ``METHODS`` it ran to a dict with ``a``,
@@ -435,10 +429,8 @@ def run_sample(
     combo = outdir / "combo.tsv"
     write_combo(sim, combo)
     write_truth(sim, outdir / "truth.tsv")
-    tmaj, tmin = allele(sim.a, sim.b)
-    k_mirrored = k or len(np.unique(tmaj * 100 + tmin))
-    k_phased = k or len(np.unique(sim.a * 100 + sim.b))
-    log(f"{outdir.name}: K mirrored {k_mirrored}, phased {k_phased}")
+    k = k or len(np.unique(sim.a * 100 + sim.b))
+    log(f"{outdir.name}: K {k}")
     src = REPO / "src" / "chisel"
 
     calls = outdir / "chisel" / "calls_bic.tsv"
@@ -458,7 +450,7 @@ def run_sample(
     npz = outdir / "hmm" / "hmm.npz"
     hmm_calls = outdir / "hmm" / "calls_bic.tsv"
     t_hmm = run(
-        [py27, PKG / "hmm_caller.py", combo, "--hmm-states", k_mirrored]
+        [py27, PKG / "hmm_caller.py", combo, "--hmm-states", k]
         + ["--hmm-stay", stay, "--hmm-maxcn", maxcn, "--hmm-npz", npz]
         + ["-j", jobs, "--seed", seed],
         outdir / "hmm" / "caller.log",
@@ -484,22 +476,6 @@ def run_sample(
         "hmm_chisel_caller_bic": t_hmm,
         "hmm_chisel_cloner_bic": t_hmm + t_hmm_cloner,
     }
-    if phased:
-        start = time.time()
-        baf = np.where(sim.a_count + sim.b_count > 0, sim.baf, np.nan)
-        model = BinCellHMM(k_phased, stay=stay, maxcn=maxcn, mirrored=False, seed=seed)
-        model.fit(sim.rdr, baf, sim.chroms)
-        path_p = model.predict(sim.rdr, baf, sim.chroms)
-        np.savez(
-            outdir / "hmm_phased.npz",
-            members=path_p.T,
-            means=model.means_,
-            variances=model.variances_,
-            state_cn=model.state_cn(),
-            init_states=model.grid_states_[model.init_idx_],
-            loglik=np.array(model.loglik_history_),
-        )
-        seconds["hmm_phased_grid"] = time.time() - start
     res, hm = load_results(sim, outdir)
     for name, value in seconds.items():
         res[name]["seconds"] = value
@@ -514,8 +490,7 @@ def load_results(sim, outdir):
         outdir: The sample's output directory.
 
     Returns:
-        (res, hm) as ``run_sample`` returns them, less the ``seconds`` of each method;
-        ``hmm_phased_grid`` only where hmm_phased.npz exists.
+        (res, hm) as ``run_sample`` returns them, less the ``seconds`` of each method.
     """
     outdir = Path(outdir)
     hm = dict(np.load(outdir / "hmm" / "hmm.npz"))
@@ -546,12 +521,6 @@ def load_results(sim, outdir):
             clone_ari=read_clone_ari(outdir / "hmm" / "mapping_bic.tsv", sim),
         ),
     }
-    phased = outdir / "hmm_phased.npz"
-    if phased.exists():
-        hp = np.load(phased)
-        path_p = hp["members"].T
-        cn_p = hp["state_cn"][path_p]
-        res["hmm_phased_grid"] = dict(a=cn_p[..., 0], b=cn_p[..., 1], labels=path_p)
     return res, hm
 
 
@@ -618,39 +587,10 @@ def plot_ab_heatmaps(sim, res, path, cn_palette="cnamaste"):
     )
 
 
-def truth_landmarks(sim):
-    """Return each true state's expected (BAF, RDR) as a cnplot ``expected_df``.
-
-    A state (a, b) sits at BAF b / (a + b) (0.5 for (0, 0)) and at the median, over the
-    (bin, cell) entries in that state, of (a + b) / the cell's mean total copy number, the
-    simulation's RDR expectation (simulation.py, read counts).
-
-    Args:
-        sim: Simulated data.
-
-    Returns:
-        DataFrame with ``cn_truth`` ("a|b"), ``exp_BAF``, ``exp_RDR`` and ``is_balanced``.
-    """
-    total = sim.a + sim.b
-    rel = total / total.mean(axis=1, keepdims=True)
-    rows = []
-    for a, b in sorted(set(zip(sim.a.ravel().tolist(), sim.b.ravel().tolist()))):
-        entries = (sim.a == a) & (sim.b == b)
-        rows.append(
-            {
-                "cn_truth": f"{a}|{b}",
-                "exp_BAF": b / (a + b) if a + b else 0.5,
-                "exp_RDR": float(np.median(rel[entries])),
-                "is_balanced": a == b,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def plot_rdr_baf(sim, res, path, cn_palette="cnamaste"):
     """Write the (BAF, RDR) scatters of one sample with cnplot, one dot per (cell, bin): a page
-    colored by the truth, then one per method of ``SHOWN``, the true states' landmarks
-    (``truth_landmarks``) on every page (``plots.plot_rdr_baf_scatters``).
+    colored by the truth, then one per method of ``SHOWN``, each page labelling only its own
+    states (``plots.plot_rdr_baf_scatters``).
 
     Args:
         sim: Simulated data.
@@ -664,7 +604,6 @@ def plot_rdr_baf(sim, res, path, cn_palette="cnamaste"):
         baf,
         [("truth", sim.a, sim.b)] + [(t, res[m]["a"], res[m]["b"]) for t, m in SHOWN],
         path,
-        truth_landmarks(sim),
         cn_palette,
     )
 
@@ -708,7 +647,7 @@ def plot_sample(sim, res, hm, outdir, maxcn=6, seed=0, cn_palette="cnamaste"):
     plot_rdr_baf(sim, res, outdir / "rdr_baf_scatter.pdf", cn_palette)
     data = hm["data"]
     points = np.column_stack([data[:, 0::2].ravel(), data[:, 1::2].ravel()])
-    grid_states, grid_means = cn_grid(maxcn, 2.0, mirrored=True)
+    grid_states, grid_means = cn_grid(maxcn, 2.0)
     init_idx = [
         int(np.flatnonzero((grid_states == s).all(1))[0]) for s in hm["init_states"]
     ]

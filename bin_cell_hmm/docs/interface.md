@@ -1,14 +1,14 @@
 # Interface: a swap-in for CHISEL's global clustering
 
-`hmm.hmmclustering` is a drop-in counterpart of CHISEL's global clustering, `Clusterizer.kclustering`. It takes the same RDR/BAF data matrix, but every cell gets its own Markov chain along the genome over K emission states shared by all cells. It returns a state per (bin, cell) rather than a cluster per bin. CHISEL's own `Caller.calling` then turns those states into copy numbers per cell.
+`hmm.hmmclustering` is a drop-in counterpart of CHISEL's global clustering, `Clusterizer.kclustering`. It takes the same RDR/BAF data-matrix layout, with the phased BAF in place of CHISEL's mirrored one, but every cell gets its own Markov chain along the genome over K emission states shared by all cells. It returns a state per (bin, cell) rather than a cluster per bin. CHISEL's own `Caller.calling` then turns those states into copy numbers per cell.
 
 ## `kclustering` and `hmmclustering`
 
 | | `Clusterizer.kclustering` | `hmm.hmmclustering` |
 |---|---|---|
-| Data | `data`: `(n_bins, 2 * n_cells)`, columns `[RDR_e1, mBAF_e1, RDR_e2, ...]` from `Caller.format_combo` | same `data` |
+| Data | `data`: `(n_bins, 2 * n_cells)`, columns `[RDR_e1, mBAF_e1, RDR_e2, ...]` from `Caller.format_combo`, the BAF mirrored | the same layout with the phased BAF, `[RDR_e1, BAF_e1, ...]`, from [`hmm_caller.format_phased`](../hmm_caller.py#L95); NaN where a cell has no SNP-covering read |
 | Extra input | - | `chroms`: chromosome of each row of `data` |
-| Hyper-parameters | `restarts, threshold, seed, lord, j, LB, UB` | `K, stay, maxcn, base, mirrored, restarts, maxiter, tol, varfloor, seed` |
+| Hyper-parameters | `restarts, threshold, seed, lord, j, LB, UB` | `K, stay, maxcn, base, restarts, maxiter, tol, varfloor, seed` |
 | Output | `members`: `(n_bins,)` cluster per bin | `members`: `(n_bins, n_cells)` state per (bin, cell); `members[mapb[b], x]` is bin `b` in the x-th sorted cell |
 
 ## `hmm_caller.py`: CHISEL's Caller with the HMM
@@ -17,11 +17,11 @@ The code downstream in `Caller` (`est_clusters`, `call`, `infer`) indexes `membe
 
 | Step | `Caller.main` | `hmm_caller.py` |
 |---|---|---|
-| read | `read_combo`, `format_combo` | same functions |
+| read | `read_combo`, `format_combo` | `read_combo`; `format_phased`: `format_combo`'s rows and cells, phased BAF |
 | cluster | `kclustering` | `hmmclustering` |
 | summarize clusters | `est_clusters`: cluster c = bins with `members[mapb[b]] == c` | `cell_clusters`: cluster c of cell e = bins with `members[mapb[b], x_e] == c`; same RDR, BAF and size formulas |
 | call | `call`: Pool of `init` + `calling` | `call_cells`: Pool of the same `init` + `calling` |
-| orient, phase | `infer`, `phase` | `infer`'s rule per (bin, cell), same `phase` |
+| orient, phase | `infer`, `phase` | `orient`: by default (`--hmm-orient state`) by the fitted BAF of the (bin, cell)'s HMM state, no `phase`, as the BAF is phased; with `--hmm-orient bin`, `infer`'s rule per (bin, cell), then the same `phase` |
 
 `Caller.calling(e)` reads only `clusters[c][e]`, `counts[e][c]` and `rdrs[e][c]`, so a cluster membership that differs between cells needs no change to it. Per cell, it finds the largest balanced cluster (`identify_base`), scales RDR for each even base ploidy up to `-P`, and picks the ploidy by BIC ([hmm.tex](hmm.tex), Sec. 6.2).
 

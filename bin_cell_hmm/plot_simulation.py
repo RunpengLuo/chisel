@@ -82,6 +82,7 @@ TRUTH = "truth"
 
 MEDIAN_COLUMNS = (
     "exact_altered",
+    "exact_altered_hap",
     "specificity",
     "bp_cn_rate",
     "clone_ari",

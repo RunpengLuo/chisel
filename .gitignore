@@ -11,3 +11,4 @@ bin_cell_hmm/docs/*.out
 bin_cell_hmm/docs/*.fls
 bin_cell_hmm/docs/*.fdb_latexmk
 bin_cell_hmm/docs/*.synctex.gz
+.DS_Store

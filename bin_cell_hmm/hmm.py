@@ -1,9 +1,14 @@
 """Bin-cell HMM: per-cell Markov chains over a shared set of (RDR, BAF) emission states.
 
-Drop-in counterpart of CHISEL's global clustering ``Clusterizer.kclustering``. Both take the
-matrix built by ``Caller.format_combo``, where row i is a genomic bin and columns are
+Drop-in counterpart of CHISEL's global clustering ``Clusterizer.kclustering``. Both take a
+matrix in the layout of ``Caller.format_combo``, where row i is a genomic bin and columns are
 ``[RDR_e1, BAF_e1, RDR_e2, BAF_e2, ...]`` over the sorted cells. ``kclustering`` returns one
 cluster per bin, shared by all cells. ``hmmclustering`` returns one state per (bin, cell).
+
+The BAF is taken as phased: B / (A + B) with B the same haplotype in every bin and cell, on
+[0, 1], not mirrored. No emission mean is constrained to BAF <= 0.5, and the copy-number grid
+holds both (a, b) and (b, a). Phase switches between bins are not modeled: a switch reads as a
+change of state.
 
 Model:
     Each cell is a Markov chain over its ordered bins, restarted at every chromosome. All
@@ -55,13 +60,12 @@ def make_transmat(diag, K):
     return transmat
 
 
-def cn_grid(maxcn, base=2.0, mirrored=True):
-    """Enumerate integer copy-number states and their expected (RDR, BAF).
+def cn_grid(maxcn, base=2.0):
+    """Enumerate the haplotype-specific integer copy-number states and their expected (RDR, BAF).
 
     Args:
         maxcn: Maximum total copy number a + b.
         base: Total copy number whose expected RDR is 1.
-        mirrored: If True, keep only a >= b so that BAF <= 0.5, matching CHISEL's mirrored BAF.
 
     Returns:
         states: (G, 2) int array of (a, b) with a + b <= maxcn.
@@ -70,8 +74,7 @@ def cn_grid(maxcn, base=2.0, mirrored=True):
     states = []
     for total in range(maxcn + 1):
         for a in range(total, -1, -1):
-            if not mirrored or a >= total - a:
-                states.append((a, total - a))
+            states.append((a, total - a))
     states = np.array(states, dtype=int)
     total = states.sum(axis=1)
     baf = np.full(len(states), 0.5)
@@ -234,7 +237,7 @@ def viterbi(log_emit, startprob, transmat):
 
 
 def split_data(data):
-    """Split a CHISEL ``format_combo`` matrix into per-cell RDR and BAF matrices.
+    """Split a CHISEL-layout data matrix into per-cell RDR and BAF matrices.
 
     Args:
         data: (n_bins, 2 * n_cells) array with columns [RDR_e1, BAF_e1, RDR_e2, BAF_e2, ...].
@@ -283,7 +286,6 @@ class BinCellHMM(object):
         stay: Fixed self-transition probability between adjacent bins of a cell.
         maxcn: Maximum total copy number of the initialization grid.
         base: Total copy number whose expected RDR is 1 in the grid.
-        mirrored: Grid with a >= b only (BAF in [0, 0.5]), as for CHISEL's mirrored BAF.
         restarts: Restarts of the constrained k-means initialization.
         maxiter: Maximum Baum-Welch iterations.
         tol: Stop when the total log-likelihood gains less than this.
@@ -310,7 +312,6 @@ class BinCellHMM(object):
         stay=0.99,
         maxcn=6,
         base=2.0,
-        mirrored=True,
         restarts=10,
         maxiter=100,
         tol=1e-2,
@@ -325,7 +326,6 @@ class BinCellHMM(object):
         self.stay = stay
         self.maxcn = maxcn
         self.base = base
-        self.mirrored = mirrored
         self.restarts = restarts
         self.maxiter = maxiter
         self.tol = tol
@@ -352,9 +352,7 @@ class BinCellHMM(object):
         return X, np.isfinite(X), chrom_blocks(chroms)
 
     def _init_params(self, X, rng):
-        self.grid_states_, self.grid_means_ = cn_grid(
-            self.maxcn, self.base, self.mirrored
-        )
+        self.grid_states_, self.grid_means_ = cn_grid(self.maxcn, self.base)
         pts = X.reshape(-1, 2)
         pts = pts[np.isfinite(pts).all(axis=1)]
         if len(pts) > self.maxinitpoints:
@@ -495,7 +493,6 @@ def hmmclustering(
     stay=0.99,
     maxcn=6,
     base=2.0,
-    mirrored=True,
     restarts=10,
     maxiter=100,
     tol=1e-2,
@@ -504,24 +501,25 @@ def hmmclustering(
     verbose=True,
     return_model=False,
 ):
-    """Cluster (bin, cell) points of a CHISEL data matrix with the bin-cell HMM.
+    """Cluster (bin, cell) points of a CHISEL-layout data matrix with the bin-cell HMM.
 
     Counterpart of ``Clusterizer.kclustering(data, restarts, threshold, seed, lord, j, LB, UB)``.
-    It takes the same ``data``, plus the chromosome of each row and the HMM hyper-parameters.
-    In ``Caller.main`` the call reads::
+    It takes a ``data`` matrix in the same layout, with the phased BAF in place of CHISEL's
+    mirrored one, plus the chromosome of each row and the HMM hyper-parameters.
+    ``hmm_caller.format_phased`` builds it; in ``Caller.main`` the call reads::
 
+        data, mapb, cells = format_phased(bins)
         chroms = [b[0] for b in sorted(mapb, key=mapb.get)]
         members = hmmclustering(data, chroms, K=..., seed=args['seed'])
 
     Args:
         data: (n_bins, 2 * n_cells) matrix with columns [RDR_e1, BAF_e1, RDR_e2, BAF_e2, ...],
-            rows sorted by genomic position (``Caller.format_combo``).
+            the BAF phased on [0, 1], rows sorted by genomic position.
         chroms: (n_bins,) chromosome of each row.
         K: Number of hidden states shared by all cells.
         stay: Fixed self-transition probability between adjacent bins.
         maxcn: Maximum total copy number of the initialization grid.
         base: Total copy number whose expected RDR is 1 in the grid.
-        mirrored: Grid with a >= b only; keep True for CHISEL's mirrored BAF.
         restarts: Restarts of the constrained k-means initialization.
         maxiter: Maximum Baum-Welch iterations.
         tol: Log-likelihood gain below which Baum-Welch stops.
@@ -540,7 +538,6 @@ def hmmclustering(
         stay=stay,
         maxcn=maxcn,
         base=base,
-        mirrored=mirrored,
         restarts=restarts,
         maxiter=maxiter,
         tol=tol,

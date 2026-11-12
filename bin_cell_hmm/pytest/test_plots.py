@@ -35,9 +35,21 @@ def test_plot_state_heatmaps_writes_png(tmp_path):
     assert path.stat().st_size > 0
 
 
-def test_plot_rdr_baf_scatters_writes_one_page_per_coloring(tmp_path):
-    import pandas as pd
+def test_expected_landmarks_holds_only_the_called_states():
+    from plots import expected_landmarks
 
+    a = np.array([[1, 1, 2, 2], [1, 1, 1, 1]])
+    b = np.array([[1, 1, 1, 1], [1, 1, 1, 1]])
+    lm = expected_landmarks(a, b).set_index("cn_state")
+    assert sorted(lm.index) == ["1|1", "2|1"]
+    np.testing.assert_allclose(lm.loc["2|1", "exp_BAF"], 1 / 3)
+    # NB: cell 0 has mean total 2.5: (2,1) at 3 / 2.5, (1,1) at 2 / 2.5 there and 1 in cell 1
+    np.testing.assert_allclose(lm.loc["2|1", "exp_RDR"], 1.2)
+    np.testing.assert_allclose(lm.loc["1|1", "exp_RDR"], 1.0)
+    assert bool(lm.loc["1|1", "is_balanced"]) and not bool(lm.loc["2|1", "is_balanced"])
+
+
+def test_plot_rdr_baf_scatters_writes_one_page_per_coloring(tmp_path):
     from plots import plot_rdr_baf_scatters
 
     rng = np.random.default_rng(1)
@@ -47,10 +59,7 @@ def test_plot_rdr_baf_scatters_writes_one_page_per_coloring(tmp_path):
     rdr = (a + b) / 2 + rng.normal(0, 0.05, a.shape)
     baf = np.clip(b / (a + b) + rng.normal(0, 0.05, a.shape), 0, 1)
     baf[0, 0] = np.nan
-    landmarks = pd.DataFrame(
-        {"cn_truth": ["1|1", "2|1"], "exp_BAF": [0.5, 1 / 3], "exp_RDR": [1.0, 1.5]}
-    )
     path = tmp_path / "scatter.pdf"
-    plot_rdr_baf_scatters(rdr, baf, [("truth", a, b), ("call", b, a)], path, landmarks)
+    plot_rdr_baf_scatters(rdr, baf, [("truth", a, b), ("call", b, a)], path)
     data = path.read_bytes()
     assert data.count(b"/Type /Page") - data.count(b"/Type /Pages") == 2
