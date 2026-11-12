@@ -5,7 +5,7 @@ Author: Runpeng Luo (2026-11-11)
 
 Dependencies:
     Python 3 with numpy, scikit-learn, matplotlib (bin_cell_hmm/hmm.py, simulation.py), and
-    cnplot >= 0.1.1b3 (https://github.com/raphael-group/cnplot) for ab_heatmaps.png.
+    cnplot >= 0.1.1b3 (https://github.com/raphael-group/cnplot) for ab_heatmaps.pdf.
     Python 2.7 env with CHISEL's requirements, for src/chisel/Caller.py, src/chisel/Cloner.py
     and bin_cell_hmm/hmm_caller.py.
 
@@ -26,7 +26,7 @@ Parameters:
     jobs: parallel jobs of CHISEL Caller.
     py27: python2.7 executable of the CHISEL env (default: $CHISEL_PY27, else
         ~/.local/miniconda3/envs/chisel-py27/bin/python).
-    cn_palette: cnplot (a, b) palette of ab_heatmaps.png, "cnamaste" or "hatchet".
+    cn_palette: cnplot (a, b) palette of ab_heatmaps.pdf, "cnamaste" or "hatchet".
 Outputs:
     combo.tsv, truth.tsv: simulated CHISEL input and true states.
     The suffix _bic marks output whose base ploidy per cell is the one Caller.calling's BIC
@@ -47,7 +47,7 @@ Outputs:
         N-CNA recall, CNA recall, cell-event recall, clone ARI and breakpoint counts
         (bin_cell_hmm/metrics.py).
     cn_heatmaps.png, error_maps.png, rdr_baf_states.png: figures.
-    ab_heatmaps.png: (a, b) state per cell and bin, truth and every method, drawn with cnplot
+    ab_heatmaps.pdf: (a, b) state per cell and bin, truth and every method, drawn with cnplot
         in the --cn-palette palette (plots.py).
 Notes:
     CHISEL runs unmodified as `python2.7 src/chisel/Caller.py combo.tsv -j J --seed S`, the
@@ -468,52 +468,25 @@ def run_sample(
         outdir / "hmm" / "cloner.log",
         outdir / "hmm" / "mapping_bic.tsv",
     )
-    hm = dict(np.load(npz))
-    assert (hm["chroms"].astype(str) == sim.chroms).all()
-    assert (hm["starts"] == sim.starts).all()
-    assert (hm["cells"].astype(str) == sim.cells).all()
+    ploidy = np.load(npz)["ploidy"]
     with open(outdir / "hmm" / "ploidy_bic.tsv", "w") as out:
         out.write("CELL\tCLONE\tPLOIDY\n")
-        for cell, clone, p in zip(sim.cells, sim.clone, hm["ploidy"]):
+        for cell, clone, p in zip(sim.cells, sim.clone, ploidy):
             out.write(f"{cell}\t{clone}\t{int(p)}\n")
-    members = hm["members"].T
-    cn_m = hm["state_cn"][members]
 
-    a_c, b_c, clus = read_calls(calls, 11, sim)
-    a_k, b_k, _ = read_calls(cloned, 12, sim)
-    a_h, b_h, _ = read_calls(hmm_calls, 11, sim)
-    a_hk, b_hk, _ = read_calls(hmm_cloned, 12, sim)
-    clus_cells = np.broadcast_to(clus, sim.a.shape)
-    res = {
-        "chisel_caller_bic": dict(a=a_c, b=b_c, labels=clus_cells, seconds=t_caller),
-        "chisel_cloner_bic": dict(
-            a=a_k,
-            b=b_k,
-            labels=clus_cells,
-            seconds=t_caller + t_cloner,
-            clone_ari=read_clone_ari(outdir / "chisel" / "mapping_bic.tsv", sim),
-        ),
-        "hmm_grid": dict(a=cn_m[..., 0], b=cn_m[..., 1], labels=members, seconds=t_hmm),
-        "hmm_chisel_caller_bic": dict(a=a_h, b=b_h, labels=members, seconds=t_hmm),
-        "hmm_chisel_cloner_bic": dict(
-            a=a_hk,
-            b=b_hk,
-            labels=members,
-            seconds=t_hmm + t_hmm_cloner,
-            clone_ari=read_clone_ari(outdir / "hmm" / "mapping_bic.tsv", sim),
-        ),
+    seconds = {
+        "chisel_caller_bic": t_caller,
+        "chisel_cloner_bic": t_caller + t_cloner,
+        "hmm_grid": t_hmm,
+        "hmm_chisel_caller_bic": t_hmm,
+        "hmm_chisel_cloner_bic": t_hmm + t_hmm_cloner,
     }
-
     if phased:
         start = time.time()
         baf = np.where(sim.a_count + sim.b_count > 0, sim.baf, np.nan)
         model = BinCellHMM(k_phased, stay=stay, maxcn=maxcn, mirrored=False, seed=seed)
         model.fit(sim.rdr, baf, sim.chroms)
         path_p = model.predict(sim.rdr, baf, sim.chroms)
-        cn_p = model.state_cn()[path_p]
-        res["hmm_phased_grid"] = dict(
-            a=cn_p[..., 0], b=cn_p[..., 1], labels=path_p, seconds=time.time() - start
-        )
         np.savez(
             outdir / "hmm_phased.npz",
             members=path_p.T,
@@ -523,6 +496,59 @@ def run_sample(
             init_states=model.grid_states_[model.init_idx_],
             loglik=np.array(model.loglik_history_),
         )
+        seconds["hmm_phased_grid"] = time.time() - start
+    res, hm = load_results(sim, outdir)
+    for name, value in seconds.items():
+        res[name]["seconds"] = value
+    return res, hm
+
+
+def load_results(sim, outdir):
+    """Read the calls ``run_sample`` wrote for one sample, without running anything.
+
+    Args:
+        sim: The simulated data the sample was run on.
+        outdir: The sample's output directory.
+
+    Returns:
+        (res, hm) as ``run_sample`` returns them, less the ``seconds`` of each method;
+        ``hmm_phased_grid`` only where hmm_phased.npz exists.
+    """
+    outdir = Path(outdir)
+    hm = dict(np.load(outdir / "hmm" / "hmm.npz"))
+    assert (hm["chroms"].astype(str) == sim.chroms).all()
+    assert (hm["starts"] == sim.starts).all()
+    assert (hm["cells"].astype(str) == sim.cells).all()
+    members = hm["members"].T
+    cn_m = hm["state_cn"][members]
+    a_c, b_c, clus = read_calls(outdir / "chisel" / "calls_bic.tsv", 11, sim)
+    a_k, b_k, _ = read_calls(outdir / "chisel" / "calls_cloned_bic.tsv", 12, sim)
+    a_h, b_h, _ = read_calls(outdir / "hmm" / "calls_bic.tsv", 11, sim)
+    a_hk, b_hk, _ = read_calls(outdir / "hmm" / "calls_cloned_bic.tsv", 12, sim)
+    clus_cells = np.broadcast_to(clus, sim.a.shape)
+    res = {
+        "chisel_caller_bic": dict(a=a_c, b=b_c, labels=clus_cells),
+        "chisel_cloner_bic": dict(
+            a=a_k,
+            b=b_k,
+            labels=clus_cells,
+            clone_ari=read_clone_ari(outdir / "chisel" / "mapping_bic.tsv", sim),
+        ),
+        "hmm_grid": dict(a=cn_m[..., 0], b=cn_m[..., 1], labels=members),
+        "hmm_chisel_caller_bic": dict(a=a_h, b=b_h, labels=members),
+        "hmm_chisel_cloner_bic": dict(
+            a=a_hk,
+            b=b_hk,
+            labels=members,
+            clone_ari=read_clone_ari(outdir / "hmm" / "mapping_bic.tsv", sim),
+        ),
+    }
+    phased = outdir / "hmm_phased.npz"
+    if phased.exists():
+        hp = np.load(phased)
+        path_p = hp["members"].T
+        cn_p = hp["state_cn"][path_p]
+        res["hmm_phased_grid"] = dict(a=cn_p[..., 0], b=cn_p[..., 1], labels=path_p)
     return res, hm
 
 
@@ -556,8 +582,41 @@ def score_sample(sim, res):
     return rows
 
 
+SHOWN = (
+    ("CHISEL Caller (CN_STATE)", "chisel_caller_bic"),
+    ("CHISEL Cloner (CORRECTED_HAP_CN)", "chisel_cloner_bic"),
+    ("bin-cell HMM, grid labels", "hmm_grid"),
+    ("bin-cell HMM + CHISEL Caller.calling", "hmm_chisel_caller_bic"),
+    ("bin-cell HMM + CHISEL Caller.calling + Cloner", "hmm_chisel_cloner_bic"),
+)
+"""The methods each sample's figures draw after the truth, as (title, method)."""
+
+
+def plot_ab_heatmaps(sim, res, path, cn_palette="cnamaste"):
+    """Draw the (a, b) state of every cell and bin, the truth and each method of ``SHOWN``,
+    cells grouped by true clone, with cnplot (``plots.plot_state_heatmaps``).
+
+    Args:
+        sim: Simulated data.
+        res: ``run_sample``'s or ``load_results``' methods.
+        path: Output image path.
+        cn_palette: cnplot (a, b) palette.
+    """
+    rows = np.lexsort((sim.cells, sim.clone))[::-1]
+    plot_state_heatmaps(
+        [("truth", sim.a[rows], sim.b[rows])]
+        + [(t, res[m]["a"][rows], res[m]["b"][rows]) for t, m in SHOWN],
+        bins_table(sim.chroms, sim.starts, sim.ends),
+        np.where(
+            sim.clone[rows] == 0, "normal", [f"clone{c}" for c in sim.clone[rows]]
+        ),
+        path,
+        cn_palette=cn_palette,
+    )
+
+
 def plot_sample(sim, res, hm, outdir, maxcn=6, seed=0, cn_palette="cnamaste"):
-    """Write one sample's figures: cn_heatmaps.png, error_maps.png, ab_heatmaps.png and
+    """Write one sample's figures: cn_heatmaps.png, error_maps.png, ab_heatmaps.pdf and
     rdr_baf_states.png.
 
     Args:
@@ -567,17 +626,11 @@ def plot_sample(sim, res, hm, outdir, maxcn=6, seed=0, cn_palette="cnamaste"):
         outdir: Output directory.
         maxcn: HMM grid maximum copy number.
         seed: Seed of the scatter's subsample.
-        cn_palette: cnplot (a, b) palette of ab_heatmaps.png.
+        cn_palette: cnplot (a, b) palette of ab_heatmaps.pdf.
     """
     outdir = Path(outdir)
     tmaj, tmin = allele(sim.a, sim.b)
-    shown = [
-        ("CHISEL Caller (CN_STATE)", "chisel_caller_bic"),
-        ("CHISEL Cloner (CORRECTED_HAP_CN)", "chisel_cloner_bic"),
-        ("bin-cell HMM, grid labels", "hmm_grid"),
-        ("bin-cell HMM + CHISEL Caller.calling", "hmm_chisel_caller_bic"),
-        ("bin-cell HMM + CHISEL Caller.calling + Cloner", "hmm_chisel_cloner_bic"),
-    ]
+    shown = SHOWN
     order = np.lexsort((sim.cells, sim.clone))
     plot_heatmaps(
         [("truth", sim.a + sim.b)] + [(t, res[m]["a"] + res[m]["b"]) for t, m in shown],
@@ -597,17 +650,7 @@ def plot_sample(sim, res, hm, outdir, maxcn=6, seed=0, cn_palette="cnamaste"):
         order,
         outdir / "error_maps.png",
     )
-    rows = order[::-1]
-    plot_state_heatmaps(
-        [("truth", sim.a[rows], sim.b[rows])]
-        + [(t, res[m]["a"][rows], res[m]["b"][rows]) for t, m in shown],
-        bins_table(sim.chroms, sim.starts, sim.ends),
-        np.where(
-            sim.clone[rows] == 0, "normal", [f"clone{c}" for c in sim.clone[rows]]
-        ),
-        outdir / "ab_heatmaps.png",
-        cn_palette=cn_palette,
-    )
+    plot_ab_heatmaps(sim, res, outdir / "ab_heatmaps.pdf", cn_palette)
     data = hm["data"]
     points = np.column_stack([data[:, 0::2].ravel(), data[:, 1::2].ravel()])
     grid_states, grid_means = cn_grid(maxcn, 2.0, mirrored=True)

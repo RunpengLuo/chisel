@@ -42,7 +42,7 @@ In `test/out/sim_seed<seed>[_wgd<n>]/` it writes:
 - CHISEL's `chisel/calls_bic.tsv`, `calls_cloned_bic.tsv`, `mapping_bic.tsv`;
 - the HMM's `hmm/calls_bic.tsv`, `calls_cloned_bic.tsv`, `mapping_bic.tsv`, `ploidy_bic.tsv`, `hmm.npz`;
 - `metrics.tsv`;
-- four figures: `cn_heatmaps.png` (total copy number), `error_maps.png` (allele-specific mismatches), `ab_heatmaps.png` ((a, b) states drawn with cnplot's `--cn-palette`, `cnamaste` by default) and `rdr_baf_states.png` (the HMM's states in (RDR, BAF)).
+- four figures: `cn_heatmaps.png` (total copy number), `error_maps.png` (allele-specific mismatches), `ab_heatmaps.pdf` ((a, b) states drawn with cnplot's `--cn-palette`, `cnamaste` by default) and `rdr_baf_states.png` (the HMM's states in (RDR, BAF)).
 
 `--n-wgd-clones N` makes the last N tumor clones whole-genome doubled. The default simulation is 120 cells (12 normal) x 200 bins (4 chromosomes x 50 bins of 5 Mb); see [simulation.md](simulation.md).
 
@@ -59,7 +59,7 @@ It simulates each class of `simulation.SIM_CLASSES` (shared CNAs, private CNAs p
 A sample is named `numcnas<shared>.<private>_cnasize<length>_ploidy2_random<replicate>` and seeded by that name, so each replicate is an independent draw, reproducible on its own. Within a lineage, the CNAs are placed without overlap.
 
 In `test/out/benchmark/` it writes:
-- one directory per sample, as for one sample above;
+- one directory per sample: the outputs of one sample above except `cn_heatmaps.png`, `error_maps.png` and `rdr_baf_states.png`, plus `ab_heatmaps.pdf`, the (a, b) state of every cell and bin for the truth and each plotted method (`--cn-palette`, `cnamaste` by default);
 - `benchmark_metrics.tsv`, every sample and method;
 - `benchmark_medians.tsv`, each method's median per class;
 - `benchmark_metrics.pdf`/`.png`, the metric page. Per class it has a box per method for `chisel_caller_bic`, `chisel_cloner_bic`, `hmm_grid`, `hmm_chisel_caller_bic` and `hmm_chisel_cloner_bic`, in a 2 x 2 grid ([plot_simulation.py](../plot_simulation.py)):
@@ -68,4 +68,4 @@ In `test/out/benchmark/` it writes:
   - the breakpoint rate (`bp_cn_rate`), on a log axis, with the truth's median per class as a dashed line;
   - the clone ARI, of the Cloner rows only.
 
-A sample whose `metrics.tsv` exists is skipped, so an interrupted run resumes where it stopped; `--plot-only` redraws the page from the samples already run. Keep `--workers` times `--jobs` within the CPU count.
+A sample whose `metrics.tsv` exists is skipped, so an interrupted run resumes where it stopped; `--plot-only` runs no sample and redraws the page, plus the `ab_heatmaps.pdf` of any finished sample without one (read back from its calls on disk). Keep `--workers` times `--jobs` within the CPU count.

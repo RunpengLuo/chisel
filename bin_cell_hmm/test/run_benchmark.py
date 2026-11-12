@@ -9,7 +9,8 @@ Dependencies:
 
 Usage:
     python run_benchmark.py [--outdir DIR] [--replicates 2] [--workers 4] [--jobs 4]
-                            [--classes 1.2:10M 3.3:30M ...] [--py27 PATH] [--plot-only]
+                            [--classes 1.2:10M 3.3:30M ...] [--py27 PATH]
+                            [--cn-palette cnamaste] [--plot-only]
         --outdir     # output directory (default: bin_cell_hmm/test/out/benchmark)
         --classes    # <shared>.<private>:<length>M (default: simulation.SIM_CLASSES)
 
@@ -21,16 +22,21 @@ Parameters:
     jobs: parallel jobs of Caller.py and hmm_caller.py within one sample.
     K, stay, maxcn: HMM states (default: number of distinct true states), self-transition
         probability, grid maximum copy number.
-    plot_only: redraw from the per-sample metrics already written.
+    cn_palette: cnplot (a, b) palette of the per-sample heatmaps, "cnamaste" or "hatchet".
+    plot_only: run no sample; redraw the metric page, and the heatmap of every sample run
+        without one, from the samples already run.
 Outputs:
-    <sample_id>/: compare_chisel.run_sample's outputs of the sample, and its metrics.tsv.
+    <sample_id>/: compare_chisel.run_sample's outputs of the sample, its metrics.tsv, and
+        ab_heatmaps.pdf, the (a, b) state of every cell and bin for the truth and each method
+        (compare_chisel.plot_ab_heatmaps).
     benchmark_metrics.tsv: every sample's rows, sample_id first, plus bp_ratio, the method's
         breakpoints over the truth's.
     benchmark_medians.tsv: each plotted method's median per class.
     benchmark_metrics.pdf, benchmark_metrics.png: plot_simulation.plot_simulation_metrics of
         the methods of PLOTTED.
 Notes:
-    A sample whose metrics.tsv exists is not run again, so an interrupted benchmark resumes.
+    A sample whose metrics.tsv exists is not run again, so an interrupted benchmark resumes;
+    its missing heatmap is drawn from the calls on disk (compare_chisel.load_results).
     Each sample is simulated by class_config, seeded by its sample id; the methods take the
     replicate index as their seed.
 """
@@ -50,9 +56,12 @@ HERE = Path(__file__).resolve().parent
 PKG = HERE.parent
 sys.path[:0] = [str(PKG), str(HERE)]
 
+from cnplot import CN_PALETTES  # noqa: E402
 from compare_chisel import (  # noqa: E402
     DEFAULT_PY27,
+    load_results,
     log,
+    plot_ab_heatmaps,
     run_sample,
     score_sample,
     write_metrics,
@@ -95,28 +104,46 @@ def parse_args():
     p.add_argument("--stay", type=float, default=0.99)
     p.add_argument("--maxcn", type=int, default=6)
     p.add_argument("--py27", type=Path, default=DEFAULT_PY27)
+    p.add_argument("--cn-palette", choices=CN_PALETTES, default="cnamaste")
     p.add_argument("--plot-only", action="store_true")
     return p.parse_args()
 
 
 def run_one(task):
-    """Simulate, run and score one sample unless its metrics.tsv exists.
+    """Simulate, run and score one sample unless its metrics.tsv exists, then draw its
+    ab_heatmaps.pdf unless it exists.
 
     Args:
-        task: (class tuple, replicate, outdir, py27, jobs, K, stay, maxcn).
+        task: (class tuple, replicate, outdir, py27, jobs, K, stay, maxcn, cn_palette, run);
+            with ``run`` False a sample without metrics.tsv is left alone.
 
     Returns:
-        (sample id, "done" or "skipped").
+        (sample id, status): "done", "skipped" or "not run", plus ", heatmap" where one was
+        drawn.
     """
-    (shared, private, size), rep, outdir, py27, jobs, k, stay, maxcn = task
+    (shared, private, size), rep, outdir, py27, jobs, k, stay, maxcn, palette, run = (
+        task
+    )
     sid = sample_id(shared, private, size, rep)
-    metrics = outdir / sid / "metrics.tsv"
-    if metrics.exists():
-        return sid, "skipped"
-    sim = simulate(class_config(shared, private, size, rep))
-    res, _ = run_sample(sim, outdir / sid, str(py27), jobs, rep, k, stay, maxcn)
-    write_metrics(score_sample(sim, res), metrics)
-    return sid, "done"
+    sample_dir = outdir / sid
+    metrics = sample_dir / "metrics.tsv"
+    heatmap = sample_dir / "ab_heatmaps.pdf"
+    sim = res = None
+    status = "skipped"
+    if not metrics.exists():
+        if not run:
+            return sid, "not run"
+        sim = simulate(class_config(shared, private, size, rep))
+        res, _ = run_sample(sim, sample_dir, str(py27), jobs, rep, k, stay, maxcn)
+        write_metrics(score_sample(sim, res), metrics)
+        status = "done"
+    if not heatmap.exists():
+        if sim is None:
+            sim = simulate(class_config(shared, private, size, rep))
+            res, _ = load_results(sim, sample_dir)
+        plot_ab_heatmaps(sim, res, heatmap, palette)
+        status += ", heatmap"
+    return sid, status
 
 
 def collect(outdir, classes, replicates):
@@ -148,18 +175,18 @@ def main():
     args = parse_args()
     outdir = args.outdir.resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    if not args.plot_only:
-        tasks = [
-            (c, rep, outdir, args.py27, args.jobs, args.K, args.stay, args.maxcn)
-            for c in args.classes
-            for rep in range(args.replicates)
-        ]
-        log(f"{len(tasks)} samples, {args.workers} at once, {args.jobs} jobs each")
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = [pool.submit(run_one, t) for t in tasks]
-            for n, future in enumerate(as_completed(futures), 1):
-                sid, status = future.result()
-                log(f"[{n}/{len(tasks)}] {sid}: {status}")
+    tasks = [
+        (c, rep, outdir, args.py27, args.jobs, args.K, args.stay, args.maxcn)
+        + (args.cn_palette, not args.plot_only)
+        for c in args.classes
+        for rep in range(args.replicates)
+    ]
+    log(f"{len(tasks)} samples, {args.workers} at once, {args.jobs} jobs each")
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futures = [pool.submit(run_one, t) for t in tasks]
+        for n, future in enumerate(as_completed(futures), 1):
+            sid, status = future.result()
+            log(f"[{n}/{len(tasks)}] {sid}: {status}")
 
     table = collect(outdir, args.classes, args.replicates)
     table.to_csv(outdir / "benchmark_metrics.tsv", sep="\t", index=False)
